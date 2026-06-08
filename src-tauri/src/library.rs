@@ -1,7 +1,7 @@
 use crate::{
     protocol::{
-        DiscoveryPacket, LibrarySettings, Manifest, ManifestShare, ShareItem, ShareVersion,
-        TCP_PORT,
+        DiscoveryPacket, KnownPeerHint, LibrarySettings, Manifest, ManifestShare, ShareItem,
+        ShareVersion, TCP_PORT,
     },
     storage,
 };
@@ -59,6 +59,19 @@ pub struct SharedContent {
     pub name: String,
     pub size: u64,
     pub path: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+pub struct KnownDeviceRecord {
+    pub device_id: String,
+    pub device_name: String,
+    pub ip: String,
+    pub tcp_port: u16,
+    pub api_port: u16,
+    pub source: String,
+    pub pinned: bool,
+    pub last_seen: i64,
+    pub last_intro_at: Option<i64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -238,6 +251,18 @@ impl LibraryService {
                     device_id TEXT PRIMARY KEY,
                     note TEXT NOT NULL,
                     updated_at INTEGER NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS known_devices (
+                    device_id TEXT PRIMARY KEY,
+                    last_ip TEXT NOT NULL,
+                    last_tcp_port INTEGER NOT NULL,
+                    last_api_port INTEGER NOT NULL,
+                    last_name TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    pinned INTEGER NOT NULL,
+                    last_seen INTEGER NOT NULL,
+                    last_intro_at INTEGER
                 );
                 ",
             )
@@ -483,6 +508,172 @@ impl LibraryService {
                 version != packet.library_version || hash != packet.manifest_hash
             })
             .unwrap_or(true))
+    }
+
+    pub fn upsert_known_device_from_packet(
+        &self,
+        packet: &DiscoveryPacket,
+        ip: &str,
+        source: &str,
+        pinned: bool,
+    ) -> Result<(), String> {
+        self.upsert_known_device(
+            &packet.device_id,
+            &packet.device_name,
+            ip,
+            packet.tcp_port,
+            packet.api_port,
+            source,
+            pinned,
+        )
+    }
+
+    pub fn upsert_known_device(
+        &self,
+        device_id: &str,
+        device_name: &str,
+        ip: &str,
+        tcp_port: u16,
+        api_port: u16,
+        source: &str,
+        pinned: bool,
+    ) -> Result<(), String> {
+        let now = now_secs();
+        let inner = self.lock()?;
+        let existing: Option<(String, i64, Option<i64>)> = inner
+            .conn
+            .query_row(
+                "SELECT source, pinned, last_intro_at FROM known_devices WHERE device_id = ?1",
+                params![device_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()
+            .map_err(|err| format!("鏌ヨ宸茬煡璁惧澶辫触: {err}"))?;
+        let merged_pinned = pinned
+            || existing
+                .as_ref()
+                .map(|(_, existing_pinned, _)| *existing_pinned != 0)
+                .unwrap_or(false);
+        let merged_source = if merged_pinned {
+            "manual".to_string()
+        } else if existing
+            .as_ref()
+            .map(|(existing_source, _, _)| existing_source == "manual")
+            .unwrap_or(false)
+        {
+            "manual".to_string()
+        } else {
+            source.to_string()
+        };
+        let last_intro_at = existing.and_then(|(_, _, value)| value);
+        inner
+            .conn
+            .execute(
+                "INSERT OR REPLACE INTO known_devices
+                 (device_id, last_ip, last_tcp_port, last_api_port, last_name, source, pinned, last_seen, last_intro_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![
+                    device_id,
+                    ip,
+                    tcp_port as i64,
+                    api_port as i64,
+                    device_name,
+                    merged_source,
+                    if merged_pinned { 1 } else { 0 },
+                    now,
+                    last_intro_at
+                ],
+            )
+            .map_err(|err| format!("淇濆瓨宸茬煡璁惧澶辫触: {err}"))?;
+        Ok(())
+    }
+
+    pub fn touch_known_device_seen(
+        &self,
+        device_id: &str,
+        ip: &str,
+        tcp_port: u16,
+        api_port: u16,
+        device_name: &str,
+    ) -> Result<(), String> {
+        self.upsert_known_device(device_id, device_name, ip, tcp_port, api_port, "observed", false)
+    }
+
+    pub fn list_known_devices(&self) -> Result<Vec<KnownDeviceRecord>, String> {
+        let inner = self.lock()?;
+        let mut stmt = inner
+            .conn
+            .prepare(
+                "SELECT device_id, last_name, last_ip, last_tcp_port, last_api_port, source, pinned, last_seen, last_intro_at
+                 FROM known_devices
+                 ORDER BY pinned DESC, last_seen DESC, last_name ASC",
+            )
+            .map_err(|err| format!("鏌ヨ宸茬煡璁惧鍒楄〃澶辫触: {err}"))?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(KnownDeviceRecord {
+                    device_id: row.get(0)?,
+                    device_name: row.get(1)?,
+                    ip: row.get(2)?,
+                    tcp_port: row.get::<_, i64>(3)? as u16,
+                    api_port: row.get::<_, i64>(4)? as u16,
+                    source: row.get(5)?,
+                    pinned: row.get::<_, i64>(6)? != 0,
+                    last_seen: row.get(7)?,
+                    last_intro_at: row.get(8)?,
+                })
+            })
+            .map_err(|err| format!("璇诲彇宸茬煡璁惧鍒楄〃澶辫触: {err}"))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|err| format!("瑙ｆ瀽宸茬煡璁惧鍒楄〃澶辫触: {err}"))
+    }
+
+    pub fn list_pinned_known_devices(&self) -> Result<Vec<KnownDeviceRecord>, String> {
+        Ok(self
+            .list_known_devices()?
+            .into_iter()
+            .filter(|device| device.pinned)
+            .collect())
+    }
+
+    pub fn mark_known_device_intro(&self, device_id: &str) -> Result<(), String> {
+        let inner = self.lock()?;
+        inner
+            .conn
+            .execute(
+                "UPDATE known_devices SET last_intro_at = ?1 WHERE device_id = ?2",
+                params![now_secs(), device_id],
+            )
+            .map_err(|err| format!("鏇存柊宸茬煡璁惧寮曡崘鏃堕棿澶辫触: {err}"))?;
+        Ok(())
+    }
+
+    pub fn known_peer_hints(
+        &self,
+        limit: usize,
+        exclude_device_ids: &[&str],
+    ) -> Result<Vec<KnownPeerHint>, String> {
+        let excluded = exclude_device_ids
+            .iter()
+            .copied()
+            .collect::<HashSet<&str>>();
+        let mut peers = Vec::new();
+        for device in self.list_known_devices()? {
+            if excluded.contains(device.device_id.as_str()) {
+                continue;
+            }
+            peers.push(KnownPeerHint {
+                device_id: device.device_id,
+                device_name: device.device_name,
+                ip: device.ip,
+                tcp_port: device.tcp_port,
+                api_port: device.api_port,
+            });
+            if peers.len() >= limit {
+                break;
+            }
+        }
+        Ok(peers)
     }
 
     pub fn has_active_remote_owner(&self, owner_device_id: &str) -> bool {

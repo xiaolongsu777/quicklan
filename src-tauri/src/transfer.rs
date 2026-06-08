@@ -732,6 +732,7 @@ impl TransferService {
             manifest_hash: summary.manifest_hash,
             upload_tasks: 0,
             avatar_hash: None,
+            known_peers: Vec::new(),
         };
         if let Ok(socket) = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)) {
             let _ = socket.set_broadcast(true);

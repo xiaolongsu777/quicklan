@@ -14,6 +14,8 @@ export type DeviceInfo = {
   note: string | null;
   avatar_hash: string | null;
   is_local: boolean;
+  is_known: boolean;
+  discovered_via: string | null;
 };
 
 export type TransferStatus =

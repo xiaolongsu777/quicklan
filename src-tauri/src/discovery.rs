@@ -2,8 +2,8 @@ use crate::{
     lan_api,
     library::LibraryService,
     protocol::{
-        DeviceInfo, DiscoveryPacket, NetworkStatus, DEVICE_TTL_SECS, DISCOVERY_PORT,
-        LIBRARY_ANNOUNCE_INTERVAL_SECS, PRESENCE_INTERVAL_SECS,
+        DeviceInfo, DiscoveryPacket, KnownPeerHint, NetworkStatus, DEVICE_TTL_SECS,
+        DISCOVERY_PORT, LIBRARY_ANNOUNCE_INTERVAL_SECS, PRESENCE_INTERVAL_SECS,
     },
     settings::SettingsService,
     storage,
@@ -21,6 +21,9 @@ use std::{
 use tauri::{AppHandle, Emitter};
 use uuid::Uuid;
 
+const KNOWN_PROBE_INTERVAL_SECS: u64 = 3;
+const INTRO_HINT_LIMIT: usize = 6;
+
 #[derive(Clone)]
 pub struct DiscoveryService {
     app: AppHandle,
@@ -30,12 +33,34 @@ pub struct DiscoveryService {
     settings: SettingsService,
     library: LibraryService,
     devices: Arc<Mutex<HashMap<String, DeviceEntry>>>,
+    candidate_ips: Arc<Mutex<HashMap<String, CandidatePeer>>>,
 }
 
 #[derive(Clone)]
 struct DeviceEntry {
     info: DeviceInfo,
     last_seen: Instant,
+}
+
+#[derive(Clone)]
+struct CandidatePeer {
+    source: CandidateSource,
+    last_seen: Instant,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CandidateSource {
+    Manual,
+    Introduced,
+}
+
+impl CandidateSource {
+    fn merge(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Manual, _) | (_, Self::Manual) => Self::Manual,
+            _ => Self::Introduced,
+        }
+    }
 }
 
 impl DiscoveryService {
@@ -54,18 +79,21 @@ impl DiscoveryService {
             settings,
             library,
             devices: Arc::new(Mutex::new(HashMap::new())),
+            candidate_ips: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
     pub fn start(&self) {
+        self.preload_known_candidates();
         self.start_presence_loop();
         self.start_library_announce_loop();
+        self.start_known_peer_probe_loop();
         self.start_listen_loop();
         self.start_prune_loop();
     }
 
     pub fn broadcast_now(&self) {
-        let packet = self.packet("library");
+        let packet = self.packet("library", None, false);
         let _ = broadcast_packet(&packet);
     }
 
@@ -110,8 +138,9 @@ impl DiscoveryService {
     }
 
     pub fn probe_ip(&self, ip: String) -> Result<(), String> {
-        let target_ip: IpAddr = ip.parse().map_err(|_| "IP 地址无效".to_string())?;
-        let packet = self.packet("library");
+        let target_ip: IpAddr = ip.parse().map_err(|_| "IP 鍦板潃鏃犳晥".to_string())?;
+        self.remember_candidate_ip(target_ip, CandidateSource::Manual);
+        let packet = self.packet("library", None, true);
         send_discovery_packet(&packet, SocketAddr::new(target_ip, DISCOVERY_PORT))
     }
 
@@ -138,8 +167,25 @@ impl DiscoveryService {
         }
     }
 
-    fn packet(&self, packet_type: &str) -> DiscoveryPacket {
+    fn packet(
+        &self,
+        packet_type: &str,
+        target_device_id: Option<&str>,
+        include_known_peers: bool,
+    ) -> DiscoveryPacket {
         let summary = self.library.summary();
+        let known_peers = if include_known_peers {
+            let mut exclude = vec![self.device_id.as_str()];
+            if let Some(target_id) = target_device_id {
+                exclude.push(target_id);
+            }
+            self.library
+                .known_peer_hints(INTRO_HINT_LIMIT, &exclude)
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+
         DiscoveryPacket {
             app: "quicklan".to_string(),
             version: 1,
@@ -153,13 +199,29 @@ impl DiscoveryService {
             manifest_hash: summary.manifest_hash,
             upload_tasks: 0,
             avatar_hash: self.settings.avatar_hash(),
+            known_peers,
+        }
+    }
+
+    fn preload_known_candidates(&self) {
+        if let Ok(known_devices) = self.library.list_known_devices() {
+            for known in known_devices {
+                let source = if known.pinned {
+                    CandidateSource::Manual
+                } else {
+                    CandidateSource::Introduced
+                };
+                if let Ok(ip) = known.ip.parse::<IpAddr>() {
+                    self.remember_candidate_ip(ip, source);
+                }
+            }
         }
     }
 
     fn start_presence_loop(&self) {
         let service = self.clone();
         thread::spawn(move || loop {
-            let packet = service.packet("presence");
+            let packet = service.packet("presence", None, false);
             let _ = broadcast_packet(&packet);
             thread::sleep(Duration::from_secs(PRESENCE_INTERVAL_SECS));
         });
@@ -170,6 +232,49 @@ impl DiscoveryService {
         thread::spawn(move || loop {
             service.broadcast_now();
             thread::sleep(Duration::from_secs(LIBRARY_ANNOUNCE_INTERVAL_SECS));
+        });
+    }
+
+    fn start_known_peer_probe_loop(&self) {
+        let service = self.clone();
+        thread::spawn(move || {
+            let mut round: u64 = 0;
+            loop {
+                round = round.wrapping_add(1);
+
+                if let Ok(known_devices) = service.library.list_known_devices() {
+                    for known in known_devices {
+                        if let Ok(ip) = known.ip.parse::<IpAddr>() {
+                            let source = if known.pinned {
+                                CandidateSource::Manual
+                            } else {
+                                CandidateSource::Introduced
+                            };
+                            service.remember_candidate_ip(ip, source);
+                            let packet_type = if round % 4 == 0 { "library" } else { "presence" };
+                            let packet =
+                                service.packet(packet_type, Some(&known.device_id), true);
+                            let _ = send_discovery_packet(
+                                &packet,
+                                SocketAddr::new(ip, DISCOVERY_PORT),
+                            );
+                        }
+                    }
+                }
+
+                let candidates = service.candidate_targets();
+                for (ip, source) in candidates {
+                    let packet_type = if source == CandidateSource::Manual || round % 4 == 0 {
+                        "library"
+                    } else {
+                        "presence"
+                    };
+                    let packet = service.packet(packet_type, None, true);
+                    let _ = send_discovery_packet(&packet, SocketAddr::new(ip, DISCOVERY_PORT));
+                }
+
+                thread::sleep(Duration::from_secs(KNOWN_PROBE_INTERVAL_SECS));
+            }
         });
     }
 
@@ -186,7 +291,7 @@ impl DiscoveryService {
                     return;
                 }
             };
-            let mut buf = [0_u8; 4096];
+            let mut buf = [0_u8; 8192];
 
             loop {
                 let Ok((len, addr)) = socket.recv_from(&mut buf) else {
@@ -199,7 +304,22 @@ impl DiscoveryService {
                     continue;
                 }
 
-                let _ = send_discovery_packet(&service.packet("presence"), addr);
+                let remote_ip = addr.ip();
+                let discovered_via = service.candidate_source_for_ip(&remote_ip);
+                let is_manual = matches!(discovered_via, Some(CandidateSource::Manual));
+                let is_introduced = matches!(discovered_via, Some(CandidateSource::Introduced));
+                let discovered_via_label = if is_manual {
+                    "manual"
+                } else if is_introduced {
+                    "introduced"
+                } else {
+                    "broadcast"
+                };
+
+                let response = service.packet("presence", Some(&packet.device_id), true);
+                let _ = send_discovery_packet(&response, addr);
+
+                service.remember_known_peer_hints(&packet.known_peers, &packet.device_id);
 
                 let previous_avatar_hash = devices.lock().ok().and_then(|map| {
                     map.get(&packet.device_id)
@@ -209,7 +329,7 @@ impl DiscoveryService {
                 let info = DeviceInfo {
                     id: packet.device_id.clone(),
                     name: packet.device_name.clone(),
-                    ip: addr.ip().to_string(),
+                    ip: remote_ip.to_string(),
                     tcp_port: packet.tcp_port,
                     api_port: packet.api_port,
                     online: true,
@@ -222,15 +342,32 @@ impl DiscoveryService {
                     note: service.library.device_note(&packet.device_id),
                     avatar_hash: packet.avatar_hash.clone().or(previous_avatar_hash),
                     is_local: false,
+                    is_known: true,
+                    discovered_via: Some(discovered_via_label.to_string()),
                 };
 
+                let _ = service.library.observe_device(&packet, info.ip.clone());
+                let _ = service.library.upsert_known_device_from_packet(
+                    &packet,
+                    &info.ip,
+                    discovered_via_label,
+                    is_manual,
+                );
+                let _ = service.library.touch_known_device_seen(
+                    &packet.device_id,
+                    &info.ip,
+                    packet.tcp_port,
+                    packet.api_port,
+                    &packet.device_name,
+                );
+                service.consume_candidate_ip(&remote_ip);
+
+                let has_existing_remote_owner =
+                    service.library.has_active_remote_owner(&packet.device_id);
                 let should_sync = match packet.packet_type.as_str() {
-                    "library" => service
-                        .library
-                        .observe_device(&packet, info.ip.clone())
-                        .unwrap_or(false),
-                    "presence" => service.library.has_active_remote_owner(&packet.device_id),
-                    _ => false,
+                    "library" => true,
+                    "presence" => has_existing_remote_owner || is_manual || is_introduced,
+                    _ => is_manual || is_introduced,
                 };
 
                 if let Ok(mut map) = devices.lock() {
@@ -249,15 +386,13 @@ impl DiscoveryService {
                     let library = service.library.clone();
                     let app = app.clone();
                     let ip = info.ip.clone();
+                    let tcp_port = packet.tcp_port;
+                    let api_port = packet.api_port;
+                    let device_id = packet.device_id.clone();
                     thread::spawn(move || {
-                        if let Ok(manifest) = lan_api::fetch_manifest_blocking(&ip, packet.api_port)
-                        {
-                            let _ = library.merge_manifest(
-                                manifest,
-                                ip,
-                                packet.tcp_port,
-                                packet.api_port,
-                            );
+                        if let Ok(manifest) = lan_api::fetch_manifest_blocking(&ip, api_port) {
+                            let _ = library.merge_manifest(manifest, ip.clone(), tcp_port, api_port);
+                            let _ = library.mark_known_device_intro(&device_id);
                             let _ = app.emit(
                                 "library-updated",
                                 library.list_shared_resources().unwrap_or_default(),
@@ -312,6 +447,8 @@ impl DiscoveryService {
             note: self.library.device_note(&self.device_id),
             avatar_hash: self.settings.avatar_hash(),
             is_local: true,
+            is_known: true,
+            discovered_via: Some("local".to_string()),
         }
     }
 
@@ -327,13 +464,79 @@ impl DiscoveryService {
         });
         devices
     }
+
+    fn remember_known_peer_hints(&self, hints: &[KnownPeerHint], source_device_id: &str) {
+        for hint in hints {
+            if hint.device_id == self.device_id || hint.device_id == source_device_id {
+                continue;
+            }
+            if let Ok(ip) = hint.ip.parse::<IpAddr>() {
+                self.remember_candidate_ip(ip, CandidateSource::Introduced);
+                let _ = self.library.upsert_known_device(
+                    &hint.device_id,
+                    &hint.device_name,
+                    &hint.ip,
+                    hint.tcp_port,
+                    hint.api_port,
+                    "introduced",
+                    false,
+                );
+            }
+        }
+    }
+
+    fn remember_candidate_ip(&self, target_ip: IpAddr, source: CandidateSource) {
+        if target_ip.is_loopback() || self.is_local_ip(target_ip) {
+            return;
+        }
+        if let Ok(mut candidates) = self.candidate_ips.lock() {
+            let key = target_ip.to_string();
+            let entry = candidates.entry(key).or_insert(CandidatePeer {
+                source,
+                last_seen: Instant::now(),
+            });
+            entry.source = entry.source.merge(source);
+            entry.last_seen = Instant::now();
+        }
+    }
+
+    fn consume_candidate_ip(&self, target_ip: &IpAddr) {
+        if let Ok(mut candidates) = self.candidate_ips.lock() {
+            candidates.remove(&target_ip.to_string());
+        }
+    }
+
+    fn candidate_source_for_ip(&self, target_ip: &IpAddr) -> Option<CandidateSource> {
+        self.candidate_ips
+            .lock()
+            .ok()
+            .and_then(|candidates| candidates.get(&target_ip.to_string()).map(|peer| peer.source))
+    }
+
+    fn candidate_targets(&self) -> Vec<(IpAddr, CandidateSource)> {
+        self.candidate_ips
+            .lock()
+            .map(|candidates| {
+                candidates
+                    .iter()
+                    .filter_map(|(ip, peer)| ip.parse::<IpAddr>().ok().map(|addr| (addr, peer.source)))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn is_local_ip(&self, ip: IpAddr) -> bool {
+        local_ipv4_addresses()
+            .into_iter()
+            .any(|local_ip| IpAddr::V4(local_ip) == ip)
+    }
 }
 
 fn broadcast_packet(packet: &DiscoveryPacket) -> Result<(), String> {
     let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))
-        .map_err(|err| format!("绑定 UDP 广播失败: {err}"))?;
+        .map_err(|err| format!("缁戝畾 UDP 骞挎挱澶辫触: {err}"))?;
     let _ = socket.set_broadcast(true);
-    let payload = serde_json::to_vec(packet).map_err(|err| format!("编码发现广播失败: {err}"))?;
+    let payload = serde_json::to_vec(packet).map_err(|err| format!("缂栫爜鍙戠幇骞挎挱澶辫触: {err}"))?;
     for target in broadcast_targets() {
         let _ = socket.send_to(
             &payload,
@@ -345,12 +548,12 @@ fn broadcast_packet(packet: &DiscoveryPacket) -> Result<(), String> {
 
 fn send_discovery_packet(packet: &DiscoveryPacket, target: SocketAddr) -> Result<(), String> {
     let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))
-        .map_err(|err| format!("绑定 UDP 探测失败: {err}"))?;
+        .map_err(|err| format!("缁戝畾 UDP 鎺㈡祴澶辫触: {err}"))?;
     let _ = socket.set_broadcast(true);
-    let payload = serde_json::to_vec(packet).map_err(|err| format!("编码发现探测失败: {err}"))?;
+    let payload = serde_json::to_vec(packet).map_err(|err| format!("缂栫爜鍙戠幇鎺㈡祴澶辫触: {err}"))?;
     socket
         .send_to(&payload, target)
-        .map_err(|err| format!("发送发现探测失败: {err}"))?;
+        .map_err(|err| format!("鍙戦€佸彂鐜版帰娴嬪け璐? {err}"))?;
     Ok(())
 }
 

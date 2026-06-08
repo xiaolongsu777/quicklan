@@ -22,12 +22,23 @@ pub struct DiscoveryPacket {
     pub manifest_hash: String,
     pub upload_tasks: i64,
     pub avatar_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub known_peers: Vec<KnownPeerHint>,
 }
 
 impl DiscoveryPacket {
     pub fn is_quicklan(&self) -> bool {
         self.app == "quicklan" && self.version == 1
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KnownPeerHint {
+    pub device_id: String,
+    pub device_name: String,
+    pub ip: String,
+    pub tcp_port: u16,
+    pub api_port: u16,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -47,6 +58,8 @@ pub struct DeviceInfo {
     pub note: Option<String>,
     pub avatar_hash: Option<String>,
     pub is_local: bool,
+    pub is_known: bool,
+    pub discovered_via: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
