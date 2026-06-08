@@ -2,18 +2,16 @@
 
 QuickLAN is a Windows 10/11 LAN file sharing and transfer desktop app created by xiaolong su.
 
-## Overview
-
-QuickLAN focuses on local-network device discovery, fast file transfer, and a distributed shared file library. Shared resources publish indexes and immutable shared-store snapshots instead of uploading original files to a central server.
-
-Core ideas:
+## Features
 
 - LAN device discovery with UDP broadcast.
-- Direct TCP file transfer with receiver confirmation for quick transfer.
-- Distributed manifest sync for shared resources.
-- Shared Store snapshots at `QuickLANData/shared_store/{file_hash}/content.bin`.
-- Downloaders automatically become replica nodes after SHA256 verification.
-- No central server dependency.
+- Point-to-point fast file transfer over TCP.
+- Distributed shared file library with local Shared Store snapshots.
+- Manifest sync over LAN HTTP API.
+- SHA-256 verification after transfers and downloads.
+- Downloaders automatically become replica nodes for shared resources.
+- Password-protected shared resources.
+- Local device notes, tray background mode, and single-instance startup.
 
 ## Tech Stack
 
@@ -21,30 +19,35 @@ Core ideas:
 - Desktop: Tauri
 - Backend: Rust
 - Local database: SQLite
-- Network: UDP broadcast, TCP transfer, LAN HTTP API
+- Networking: UDP broadcast, TCP transfer, LAN HTTP manifest API
 
 ## Development
 
-```bash
+```powershell
 npm install
-npm run typecheck
+npm run app:dev
+```
+
+## Build
+
+```powershell
 npm run app:build
 ```
 
-Rust checks:
+The Windows NSIS installer is generated under:
 
-```bash
-cd src-tauri
-cargo check
-cargo test
+```text
+src-tauri/target/release/bundle/nsis/
 ```
 
-## Network Ports
+## Ports
 
-- UDP discovery: `45454`
-- TCP transfer: starts at `45455` and may fall back through a port range
-- LAN HTTP API: starts at `45457` and may fall back through a port range
+- UDP `45454`: LAN device discovery
+- TCP `45455-45474`: file transfer
+- TCP `45457-45476`: LAN manifest HTTP API
+- TCP `127.0.0.1:45456`: local control API
 
 ## Version
 
 Current version: `0.1.1`
+
