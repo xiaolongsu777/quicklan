@@ -273,6 +273,7 @@ pub fn update_nickname(
     let next = state.settings.update_nickname(nickname)?;
     state.library.set_device_name(next.nickname.clone());
     state.discovery.broadcast_now();
+    state.discovery.emit_devices();
     Ok(next)
 }
 
@@ -314,6 +315,7 @@ pub async fn choose_avatar(
     }
     let settings = state.settings.update_avatar(target, hash)?;
     state.discovery.broadcast_now();
+    state.discovery.emit_devices();
     Ok(Some(settings))
 }
 

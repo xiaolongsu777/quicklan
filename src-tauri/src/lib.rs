@@ -150,6 +150,8 @@ pub fn run() {
         .setup(|app| {
             setup_tray(app)?;
             let app_handle = app.handle().clone();
+            storage::migrate_legacy_data()
+                .map_err(|err| format!("failed to migrate local data: {err}"))?;
             let settings = SettingsService::load();
             let device_id = discovery::load_or_create_device_id();
             let library = LibraryService::load(device_id, settings.nickname())

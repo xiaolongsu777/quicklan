@@ -7,15 +7,11 @@ use std::{
 };
 
 pub fn app_data_dir() -> PathBuf {
-    dirs::data_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("QuickLANData")
+    install_data_dir()
 }
 
 pub fn config_dir() -> PathBuf {
-    dirs::config_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("QuickLAN")
+    install_data_dir().join("config")
 }
 
 pub fn database_path() -> PathBuf {
@@ -38,6 +34,18 @@ pub fn current_avatar_path(extension: &str) -> PathBuf {
     avatar_dir().join(format!("current.{extension}"))
 }
 
+pub fn migrate_legacy_data() -> Result<(), String> {
+    copy_dir_missing(&legacy_app_data_dir(), &app_data_dir())?;
+    copy_dir_missing(&legacy_config_dir(), &config_dir())
+}
+
+pub fn migrated_app_data_path(path: &Path) -> Option<PathBuf> {
+    path.strip_prefix(legacy_app_data_dir())
+        .ok()
+        .map(|relative| app_data_dir().join(relative))
+        .filter(|path| path.exists())
+}
+
 pub fn shared_content_path(file_hash: &str) -> PathBuf {
     shared_store_dir().join(file_hash).join("content.bin")
 }
@@ -58,6 +66,53 @@ pub fn ensure_app_dirs() -> Result<(), String> {
         .map_err(|err| format!("创建 QuickLANData 失败: {err}"))?;
     fs::create_dir_all(profile_dir()).map_err(|err| format!("创建用户资料目录失败: {err}"))?;
     fs::create_dir_all(avatar_dir()).map_err(|err| format!("创建头像目录失败: {err}"))?;
+    Ok(())
+}
+
+fn install_data_dir() -> PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(|parent| parent.to_path_buf()))
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("QuickLANData")
+}
+
+fn legacy_app_data_dir() -> PathBuf {
+    dirs::data_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("QuickLANData")
+}
+
+fn legacy_config_dir() -> PathBuf {
+    dirs::config_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("QuickLAN")
+}
+
+fn copy_dir_missing(source: &Path, target: &Path) -> Result<(), String> {
+    if source == target || !source.is_dir() {
+        return Ok(());
+    }
+    fs::create_dir_all(target)
+        .map_err(|err| format!("创建数据目录失败 {}: {err}", target.display()))?;
+    for entry in fs::read_dir(source)
+        .map_err(|err| format!("读取旧数据目录失败 {}: {err}", source.display()))?
+    {
+        let entry = entry.map_err(|err| format!("读取旧数据条目失败: {err}"))?;
+        let source_path = entry.path();
+        let target_path = target.join(entry.file_name());
+        if source_path.is_dir() {
+            copy_dir_missing(&source_path, &target_path)?;
+        } else if source_path.is_file() && !target_path.exists() {
+            fs::copy(&source_path, &target_path).map_err(|err| {
+                format!(
+                    "迁移旧数据失败 {} -> {}: {err}",
+                    source_path.display(),
+                    target_path.display()
+                )
+            })?;
+        }
+    }
     Ok(())
 }
 

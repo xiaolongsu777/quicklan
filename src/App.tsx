@@ -403,6 +403,7 @@ function MainWindow() {
           onSend={() =>
             void runAction(async () => {
               if (!selectedDeviceId) throw new Error("请先选择目标设备");
+              if (selectedDevice?.is_local) throw new Error("不能向本机快传");
               if (filePaths.length === 0) throw new Error("请先添加要快传的文件");
               await sendFiles(selectedDeviceId, filePaths);
               setFilePaths([]);
@@ -810,7 +811,7 @@ function DevicesTab(props: {
                   <span>
                     <strong>{device.note ? `${device.note}（${device.name}）` : device.name}</strong>
                     <small>
-                      {device.ip}:{device.tcp_port} · {device.share_count} 个资源
+                      {device.is_local ? "本机" : `${device.ip}:${device.tcp_port}`} · {device.share_count} 个资源
                     </small>
                   </span>
                 </button>
@@ -842,9 +843,9 @@ function DevicesTab(props: {
         <div className="sendbar">
           <div>
             <strong>{props.selectedDevice ? props.selectedDevice.name : "未选择设备"}</strong>
-            <span>{props.filePaths.length > 0 ? `已选择 ${props.filePaths.length} 个文件` : "添加文件并选择设备后即可发送"}</span>
+            <span>{props.selectedDevice?.is_local ? "不能向本机快传" : props.filePaths.length > 0 ? `已选择 ${props.filePaths.length} 个文件` : "添加文件并选择设备后即可发送"}</span>
           </div>
-          <button className="primary" disabled={props.busy} onClick={props.onSend}>
+          <button className="primary" disabled={props.busy || !!props.selectedDevice?.is_local} onClick={props.onSend}>
             <Send size={17} /> 发送
           </button>
         </div>
@@ -1071,7 +1072,7 @@ function ChatTab(props: {
                     <img className="avatar" src={messageAvatarSrc(message, props.devices)} alt="" onError={useDefaultAvatar} />
                     <div>
                       <div className="chat-message-head">
-                        <strong>{message.sender_name}</strong>
+                        <strong>{messageSenderName(message, props.devices)}</strong>
                         <span>{formatDateTime(message.created_at)}</span>
                       </div>
                       <p>{message.body}</p>
@@ -1081,7 +1082,7 @@ function ChatTab(props: {
               )}
             </div>
             <div className="chat-input">
-              <input
+              <textarea
                 value={props.draft}
                 onChange={(event) => props.onDraft(event.target.value)}
                 onKeyDown={(event) => {
@@ -1091,6 +1092,7 @@ function ChatTab(props: {
                   }
                 }}
                 placeholder="输入消息"
+                rows={2}
               />
               <button className="primary" disabled={props.busy || !props.draft.trim()} onClick={props.onSend}>
                 <Send size={16} /> 发送
@@ -1447,13 +1449,20 @@ function localAvatarSrc(settings: AppSettings, networkStatus: NetworkStatus | nu
 
 function deviceAvatarSrc(device: DeviceInfo) {
   if (!device.avatar_hash) return defaultAvatarUrl;
-  return `http://${device.ip}:${device.api_port}/avatars/${encodeURIComponent(device.avatar_hash)}?v=${encodeURIComponent(device.avatar_hash)}`;
+  const host = device.is_local ? "127.0.0.1" : device.ip;
+  return `http://${host}:${device.api_port}/avatars/${encodeURIComponent(device.avatar_hash)}?v=${encodeURIComponent(device.avatar_hash)}`;
 }
 
 function messageAvatarSrc(message: ChatMessage, devices: DeviceInfo[]) {
   const device = devices.find((item) => item.id === message.sender_device_id);
   if (device) return deviceAvatarSrc(device);
   return defaultAvatarUrl;
+}
+
+function messageSenderName(message: ChatMessage, devices: DeviceInfo[]) {
+  const device = devices.find((item) => item.id === message.sender_device_id);
+  if (!device?.note) return message.sender_name;
+  return `${device.note}（${message.sender_name}）`;
 }
 
 function useDefaultAvatar(event: React.SyntheticEvent<HTMLImageElement>) {

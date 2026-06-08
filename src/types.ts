@@ -13,6 +13,7 @@ export type DeviceInfo = {
   latency_ms: number | null;
   note: string | null;
   avatar_hash: string | null;
+  is_local: boolean;
 };
 
 export type TransferStatus =

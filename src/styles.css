@@ -17,6 +17,7 @@ body {
 
 button,
 input,
+textarea,
 select {
   font: inherit;
 }
@@ -222,6 +223,7 @@ h2 {
 }
 
 input,
+textarea,
 select {
   min-width: 0;
   height: 34px;
@@ -572,6 +574,14 @@ select {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 10px;
+}
+
+.chat-input textarea {
+  height: auto;
+  min-height: 44px;
+  max-height: 140px;
+  resize: vertical;
+  line-height: 1.45;
 }
 
 .member-picker {

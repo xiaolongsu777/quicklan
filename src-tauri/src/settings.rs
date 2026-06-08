@@ -144,6 +144,12 @@ fn normalize_settings(mut settings: AppSettings, defaults: &AppSettings) -> AppS
         .unwrap_or(false)
     {
         settings.avatar_path = None;
+    } else if let Some(path) = settings
+        .avatar_path
+        .as_deref()
+        .and_then(|value| storage::migrated_app_data_path(Path::new(value)))
+    {
+        settings.avatar_path = Some(path.display().to_string());
     }
     if settings
         .avatar_hash

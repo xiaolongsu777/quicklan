@@ -72,11 +72,14 @@ impl DiscoveryService {
     pub fn list_devices(&self) -> Vec<DeviceInfo> {
         self.devices
             .lock()
-            .map(|map| snapshot_devices(&map))
+            .map(|map| self.snapshot_devices(&map))
             .unwrap_or_default()
     }
 
     pub fn find_device(&self, id: &str) -> Option<DeviceInfo> {
+        if id == self.device_id {
+            return Some(self.local_device_info());
+        }
         self.devices
             .lock()
             .ok()
@@ -93,12 +96,17 @@ impl DiscoveryService {
             if let Some(entry) = map.get_mut(&device_id) {
                 entry.info.note = note;
             }
-            snapshot_devices(&map)
+            self.snapshot_devices(&map)
         } else {
             Vec::new()
         };
         let _ = self.app.emit("devices-updated", snapshot.clone());
         Ok(snapshot)
+    }
+
+    pub fn emit_devices(&self) {
+        let snapshot = self.list_devices();
+        let _ = self.app.emit("devices-updated", snapshot);
     }
 
     pub fn probe_ip(&self, ip: String) -> Result<(), String> {
@@ -213,6 +221,7 @@ impl DiscoveryService {
                     latency_ms: None,
                     note: service.library.device_note(&packet.device_id),
                     avatar_hash: packet.avatar_hash.clone().or(previous_avatar_hash),
+                    is_local: false,
                 };
 
                 let should_sync = match packet.packet_type.as_str() {
@@ -232,7 +241,7 @@ impl DiscoveryService {
                             last_seen: Instant::now(),
                         },
                     );
-                    let snapshot = snapshot_devices(&map);
+                    let snapshot = service.snapshot_devices(&map);
                     let _ = app.emit("devices-updated", snapshot);
                 }
 
@@ -261,6 +270,7 @@ impl DiscoveryService {
     }
 
     fn start_prune_loop(&self) {
+        let service = self.clone();
         let app = self.app.clone();
         let devices = self.devices.clone();
         thread::spawn(move || loop {
@@ -274,7 +284,7 @@ impl DiscoveryService {
                         changed = true;
                     }
                 }
-                snapshot_devices(&map)
+                service.snapshot_devices(&map)
             } else {
                 Vec::new()
             };
@@ -283,17 +293,40 @@ impl DiscoveryService {
             }
         });
     }
-}
 
-fn snapshot_devices(map: &HashMap<String, DeviceEntry>) -> Vec<DeviceInfo> {
-    let mut devices: Vec<DeviceInfo> = map.values().map(|entry| entry.info.clone()).collect();
-    devices.sort_by(|a, b| {
-        b.online
-            .cmp(&a.online)
-            .then_with(|| a.name.cmp(&b.name))
-            .then_with(|| a.ip.cmp(&b.ip))
-    });
-    devices
+    fn local_device_info(&self) -> DeviceInfo {
+        let summary = self.library.summary();
+        DeviceInfo {
+            id: self.device_id.clone(),
+            name: self.settings.nickname(),
+            ip: "127.0.0.1".to_string(),
+            tcp_port: self.tcp_port,
+            api_port: self.api_port,
+            online: true,
+            last_seen_ms: now_ms(),
+            share_count: summary.share_count,
+            library_version: summary.library_version,
+            manifest_hash: summary.manifest_hash,
+            upload_tasks: 0,
+            latency_ms: Some(0),
+            note: self.library.device_note(&self.device_id),
+            avatar_hash: self.settings.avatar_hash(),
+            is_local: true,
+        }
+    }
+
+    fn snapshot_devices(&self, map: &HashMap<String, DeviceEntry>) -> Vec<DeviceInfo> {
+        let mut devices: Vec<DeviceInfo> = map.values().map(|entry| entry.info.clone()).collect();
+        devices.push(self.local_device_info());
+        devices.sort_by(|a, b| {
+            b.is_local
+                .cmp(&a.is_local)
+                .then_with(|| b.online.cmp(&a.online))
+                .then_with(|| a.name.cmp(&b.name))
+                .then_with(|| a.ip.cmp(&b.ip))
+        });
+        devices
+    }
 }
 
 fn broadcast_packet(packet: &DiscoveryPacket) -> Result<(), String> {

@@ -46,6 +46,7 @@ pub struct DeviceInfo {
     pub latency_ms: Option<u64>,
     pub note: Option<String>,
     pub avatar_hash: Option<String>,
+    pub is_local: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
