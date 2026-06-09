@@ -2,16 +2,19 @@ use crate::{
     chat::{ChatMessage, ChatMessagePayload, ChatRoom, MAIN_ROOM_ID},
     protocol::{DeviceInfo, LibrarySettings, NetworkStatus, ShareItem, TransferInfo},
     settings::AppSettings,
+    watch::{WatchChatMessage, WatchJoinRequest, WatchJoinResponse, WatchRoom},
+    watch_player::WatchBounds,
     storage, AppInfo, AppState, ControlApiInfo,
 };
-use serde::{Deserialize, Serialize};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     fs,
     io::{Read, Write},
-    net::TcpStream as StdTcpStream,
+    net::{TcpStream as StdTcpStream, ToSocketAddrs},
     path::{Path, PathBuf},
     process::Command,
+    time::Duration,
 };
 use tauri::{AppHandle, State};
 use tauri_plugin_dialog::DialogExt;
@@ -85,6 +88,220 @@ pub fn send_chat_message(
     Ok(payload)
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct WatchActivation {
+    pub room: WatchRoom,
+    pub is_host: bool,
+    pub is_member: bool,
+}
+
+#[tauri::command]
+pub fn list_watch_rooms(state: State<'_, AppState>) -> Vec<WatchRoom> {
+    state.watch.list_rooms()
+}
+
+#[tauri::command]
+pub fn list_watch_chat_messages(
+    state: State<'_, AppState>,
+    room_id: String,
+) -> Vec<WatchChatMessage> {
+    state.watch.list_messages(&room_id)
+}
+
+#[tauri::command]
+pub fn create_watch_room(
+    state: State<'_, AppState>,
+    title: String,
+    is_private: bool,
+    password_hash: Option<String>,
+) -> Result<WatchRoom, String> {
+    let normalized_title = if title.trim().is_empty() {
+        format!("{} 的观影房间", state.settings.nickname())
+    } else {
+        title
+    };
+    let room = state.watch.create_room(
+        normalized_title,
+        state.settings.nickname(),
+        is_private,
+        password_hash,
+    )?;
+    broadcast_watch_room(&state, &room);
+    Ok(room)
+}
+
+#[tauri::command]
+pub fn join_watch_room(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    room_id: String,
+    password_hash: Option<String>,
+) -> Result<WatchJoinResponse, String> {
+    let room = state
+        .watch
+        .find_room(&room_id)
+        .ok_or_else(|| "观影房间不存在".to_string())?;
+    let response = if room.host_device_id == state.library.device_id() {
+        let mut response = state.watch.join_room_request(WatchJoinRequest {
+            room_id,
+            user_id: state.library.device_id(),
+            nickname: state.settings.nickname(),
+            password_hash,
+        })?;
+        response.sync = state.watch_player.current_sync(&app);
+        response
+    } else {
+        let host = state
+            .discovery
+            .find_device(&room.host_device_id)
+            .ok_or_else(|| "房主当前不在线".to_string())?;
+        post_lan_json_response(
+            &host,
+            "/watch/rooms/join",
+            &WatchJoinRequest {
+                room_id: room.room_id.clone(),
+                user_id: state.library.device_id(),
+                nickname: state.settings.nickname(),
+                password_hash,
+            },
+        )?
+    };
+    if response.accepted {
+        if let Some(next_room) = response.room.clone() {
+            state.watch.accept_room(next_room)?;
+        }
+    }
+    Ok(response)
+}
+
+#[tauri::command]
+pub fn leave_watch_room(state: State<'_, AppState>, room_id: String) -> Result<(), String> {
+    let local_id = state.library.device_id();
+    let Some(room) = state.watch.find_room(&room_id) else {
+        return Ok(());
+    };
+    if room.host_device_id == local_id {
+        state.watch.end_room(&room_id, &local_id)?;
+        broadcast_watch_room_end(&state, &room_id);
+    } else {
+        let host = state
+            .discovery
+            .find_device(&room.host_device_id)
+            .ok_or_else(|| "房主当前不在线".to_string())?;
+        let _ = post_lan_json_response::<serde_json::Value, _>(
+            &host,
+            "/watch/rooms/leave",
+            &serde_json::json!({
+                "room_id": room_id,
+                "user_id": local_id,
+            }),
+        )?;
+        let _ = state.watch.leave_room(&room.room_id, &state.library.device_id())?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn end_watch_room(
+    state: State<'_, AppState>,
+    room_id: String,
+) -> Result<(), String> {
+    state.watch.end_room(&room_id, &state.library.device_id())?;
+    broadcast_watch_room_end(&state, &room_id);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn submit_watch_room_url(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    room_id: String,
+    url: String,
+) -> Result<WatchRoom, String> {
+    let room = state
+        .watch
+        .update_room_url(&room_id, &state.library.device_id(), url.clone())?;
+    state.watch_player.load_url_async(app.clone(), url);
+    broadcast_watch_room(&state, &room);
+    Ok(room)
+}
+
+#[tauri::command]
+pub fn send_watch_chat_message(
+    state: State<'_, AppState>,
+    room_id: String,
+    body: String,
+) -> Result<WatchChatMessage, String> {
+    let message = state.watch.add_chat_message(
+        room_id.clone(),
+        state.library.device_id(),
+        state.settings.nickname(),
+        state.settings.avatar_hash(),
+        body,
+    )?;
+    broadcast_watch_chat_message(&state, &message);
+    Ok(message)
+}
+
+#[tauri::command]
+pub async fn activate_watch_room(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    room_id: String,
+) -> Result<WatchActivation, String> {
+    let room = state
+        .watch
+        .find_room(&room_id)
+        .ok_or_else(|| "观影房间不存在".to_string())?;
+    let local_id = state.library.device_id();
+    let is_host = room.host_device_id == local_id;
+    let is_member = is_host || room.member_ids.iter().any(|id| id == &local_id);
+    if is_member {
+        state.watch_player.activate(
+            &app,
+            room.room_id.clone(),
+            room.host_device_id.clone(),
+            is_host,
+            room.current_url.clone(),
+        )?;
+    } else {
+        state.watch_player.hide(&app)?;
+    }
+    Ok(WatchActivation { room, is_host, is_member })
+}
+
+#[tauri::command]
+pub fn set_watch_webview_bounds(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    bounds: WatchBounds,
+) -> Result<(), String> {
+    let _ = &state;
+    state.watch_player.set_bounds(&app, bounds)
+}
+
+#[tauri::command]
+pub fn hide_watch_webview(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    let _ = &state;
+    state.watch_player.hide(&app)
+}
+
+#[tauri::command]
+pub fn close_watch_webview(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    let _ = &state;
+    state.watch_player.clear_session(&app)
+}
+
+#[tauri::command]
+pub fn apply_watch_sync(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    payload: crate::watch::WatchSyncPayload,
+) -> Result<(), String> {
+    let _ = &state;
+    state.watch_player.apply_sync(&app, &payload)
+}
+
 #[tauri::command]
 pub fn send_files(
     state: State<'_, AppState>,
@@ -147,9 +364,10 @@ pub fn clear_finished_transfers(state: State<'_, AppState>) -> Result<(), String
 }
 
 #[tauri::command]
-pub fn get_app_info() -> AppInfo {
+pub fn get_app_info(state: State<'_, AppState>) -> AppInfo {
     AppInfo {
         version: env!("CARGO_PKG_VERSION"),
+        device_id: state.library.device_id(),
     }
 }
 
@@ -649,8 +867,87 @@ fn chat_targets(state: &State<'_, AppState>, room: &ChatRoom) -> Vec<DeviceInfo>
         .collect()
 }
 
+fn broadcast_watch_room(state: &State<'_, AppState>, room: &WatchRoom) {
+    let local_id = state.library.device_id();
+    if let Ok(body) = serde_json::to_string(room) {
+        for device in state
+            .discovery
+            .list_devices()
+            .into_iter()
+            .filter(|device| device.online && device.id != local_id)
+        {
+            post_lan_json(&device, "/watch/rooms/update", &body);
+        }
+    }
+}
+
+pub fn broadcast_local_watch_rooms(state: &AppState) {
+    let local_id = state.library.device_id();
+    let rooms = state
+        .watch
+        .list_rooms()
+        .into_iter()
+        .filter(|room| room.host_device_id == local_id)
+        .collect::<Vec<_>>();
+    if rooms.is_empty() {
+        return;
+    }
+    let devices = state
+        .discovery
+        .list_devices()
+        .into_iter()
+        .filter(|device| device.online && device.id != local_id)
+        .collect::<Vec<_>>();
+    for room in rooms {
+        if let Ok(body) = serde_json::to_string(&room) {
+            for device in &devices {
+                post_lan_json(device, "/watch/rooms/update", &body);
+            }
+        }
+    }
+}
+
+pub fn broadcast_watch_room_end_for_state(state: &AppState, room_id: &str) {
+    let local_id = state.library.device_id();
+    let body = serde_json::json!({ "room_id": room_id }).to_string();
+    for device in state
+        .discovery
+        .list_devices()
+        .into_iter()
+        .filter(|device| device.online && device.id != local_id)
+    {
+        post_lan_json(&device, "/watch/rooms/end", &body);
+    }
+}
+
+fn broadcast_watch_room_end(state: &State<'_, AppState>, room_id: &str) {
+    broadcast_watch_room_end_for_state(state.inner(), room_id);
+}
+
+fn broadcast_watch_chat_message(state: &State<'_, AppState>, message: &WatchChatMessage) {
+    let local_id = state.library.device_id();
+    let Some(room) = state.watch.find_room(&message.room_id) else {
+        return;
+    };
+    if let Ok(body) = serde_json::to_string(message) {
+        for device in state
+            .discovery
+            .list_devices()
+            .into_iter()
+            .filter(|device| device.online && device.id != local_id)
+            .filter(|device| room.member_ids.iter().any(|id| id == &device.id))
+        {
+            post_lan_json(&device, "/watch/chat/messages", &body);
+        }
+    }
+}
+
 fn post_lan_json(device: &DeviceInfo, path: &str, body: &str) {
-    if let Ok(mut stream) = StdTcpStream::connect((&*device.ip, device.api_port)) {
+    let Some(address) = socket_addr(device) else {
+        return;
+    };
+    if let Ok(mut stream) = StdTcpStream::connect_timeout(&address, Duration::from_millis(900)) {
+        let _ = stream.set_write_timeout(Some(Duration::from_millis(900)));
         let request = format!(
             "POST {path} HTTP/1.1\r\nHost: {}:{}\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
             device.ip,
@@ -659,6 +956,46 @@ fn post_lan_json(device: &DeviceInfo, path: &str, body: &str) {
         );
         let _ = stream.write_all(request.as_bytes());
     }
+}
+
+fn post_lan_json_response<T: DeserializeOwned, B: Serialize>(
+    device: &DeviceInfo,
+    path: &str,
+    payload: &B,
+) -> Result<T, String> {
+    let body = serde_json::to_string(payload).map_err(|err| format!("???????: {err}"))?;
+    let address = socket_addr(device).ok_or_else(|| "????????".to_string())?;
+    let mut stream = StdTcpStream::connect_timeout(&address, Duration::from_millis(1200))
+        .map_err(|err| format!("?????????: {err}"))?;
+    let _ = stream.set_write_timeout(Some(Duration::from_millis(1200)));
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(1200)));
+    let request = format!(
+        "POST {path} HTTP/1.1\r\nHost: {}:{}\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        device.ip,
+        device.api_port,
+        body.len()
+    );
+    stream
+        .write_all(request.as_bytes())
+        .map_err(|err| format!("??????: {err}"))?;
+    let mut buf = Vec::new();
+    stream
+        .read_to_end(&mut buf)
+        .map_err(|err| format!("??????: {err}"))?;
+    let raw = String::from_utf8_lossy(&buf);
+    let body = raw
+        .split("\r\n\r\n")
+        .nth(1)
+        .or_else(|| raw.split("\n\n").nth(1))
+        .unwrap_or_default();
+    serde_json::from_str(body).map_err(|err| format!("??????: {err}"))
+}
+
+fn socket_addr(device: &DeviceInfo) -> Option<std::net::SocketAddr> {
+    (device.ip.as_str(), device.api_port)
+        .to_socket_addrs()
+        .ok()?
+        .next()
 }
 
 fn avatar_extension(path: &Path) -> Result<&'static str, String> {

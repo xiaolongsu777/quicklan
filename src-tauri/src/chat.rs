@@ -141,7 +141,7 @@ impl ChatService {
         room_id: &str,
         requester_device_id: &str,
     ) -> Result<ChatRoom, String> {
-        let mut deleted = None;
+        let deleted;
         {
             let mut state = self.lock()?;
             let room = state
@@ -156,10 +156,10 @@ impl ChatService {
                 return Err("只有创建者可以删除聊天室".to_string());
             }
             room.deleted = true;
-            deleted = Some(room.clone());
+            deleted = room.clone();
         }
         self.save()?;
-        deleted.ok_or_else(|| "聊天室不存在".to_string())
+        Ok(deleted)
     }
 
     pub fn remove_remote_room(&self, room_id: &str) -> Result<(), String> {

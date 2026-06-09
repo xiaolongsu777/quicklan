@@ -12,6 +12,12 @@ import type {
   ShareItem,
   TransferInfo,
   UpdateInfo,
+  WatchActivation,
+  WatchBounds,
+  WatchChatMessage,
+  WatchJoinResponse,
+  WatchRoom,
+  WatchSyncPayload,
 } from "./types";
 
 export function listDevices(): Promise<DeviceInfo[]> {
@@ -40,6 +46,62 @@ export function deleteChatRoom(roomId: string): Promise<void> {
 
 export function sendChatMessage(roomId: string, body: string): Promise<ChatMessagePayload> {
   return invoke<ChatMessagePayload>("send_chat_message", { roomId, body });
+}
+
+export function listWatchRooms(): Promise<WatchRoom[]> {
+  return invoke<WatchRoom[]>("list_watch_rooms");
+}
+
+export function listWatchChatMessages(roomId: string): Promise<WatchChatMessage[]> {
+  return invoke<WatchChatMessage[]>("list_watch_chat_messages", { roomId });
+}
+
+export function createWatchRoom(
+  title: string,
+  isPrivate: boolean,
+  passwordHash?: string | null,
+): Promise<WatchRoom> {
+  return invoke<WatchRoom>("create_watch_room", { title, isPrivate, passwordHash: passwordHash ?? null });
+}
+
+export function joinWatchRoom(roomId: string, passwordHash?: string | null): Promise<WatchJoinResponse> {
+  return invoke<WatchJoinResponse>("join_watch_room", { roomId, passwordHash: passwordHash ?? null });
+}
+
+export function leaveWatchRoom(roomId: string): Promise<void> {
+  return invoke<void>("leave_watch_room", { roomId });
+}
+
+export function endWatchRoom(roomId: string): Promise<void> {
+  return invoke<void>("end_watch_room", { roomId });
+}
+
+export function submitWatchRoomUrl(roomId: string, url: string): Promise<WatchRoom> {
+  return invoke<WatchRoom>("submit_watch_room_url", { roomId, url });
+}
+
+export function sendWatchChatMessage(roomId: string, body: string): Promise<WatchChatMessage> {
+  return invoke<WatchChatMessage>("send_watch_chat_message", { roomId, body });
+}
+
+export function activateWatchRoom(roomId: string): Promise<WatchActivation> {
+  return invoke<WatchActivation>("activate_watch_room", { roomId });
+}
+
+export function setWatchWebviewBounds(bounds: WatchBounds): Promise<void> {
+  return invoke<void>("set_watch_webview_bounds", { bounds });
+}
+
+export function hideWatchWebview(): Promise<void> {
+  return invoke<void>("hide_watch_webview");
+}
+
+export function closeWatchWebview(): Promise<void> {
+  return invoke<void>("close_watch_webview");
+}
+
+export function applyWatchSync(payload: WatchSyncPayload): Promise<void> {
+  return invoke<void>("apply_watch_sync", { payload });
 }
 
 export function sendFiles(targetId: string, filePaths: string[]): Promise<string> {

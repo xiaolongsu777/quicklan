@@ -54,6 +54,7 @@ export type ControlApiInfo = {
 
 export type AppInfo = {
   version: string;
+  device_id: string;
 };
 
 export type UpdateInfo = {
@@ -111,6 +112,61 @@ export type ChatMessage = {
 export type ChatMessagePayload = {
   room: ChatRoom;
   message: ChatMessage;
+};
+
+export type WatchRoom = {
+  room_id: string;
+  host_device_id: string;
+  host_name: string;
+  title: string;
+  is_private: boolean;
+  password_hash: string | null;
+  current_url: string | null;
+  member_ids: string[];
+  status: string;
+  created_at: number;
+  updated_at: number;
+};
+
+export type WatchChatMessage = {
+  message_id: string;
+  room_id: string;
+  sender_device_id: string;
+  sender_name: string;
+  avatar_hash: string | null;
+  body: string;
+  created_at: number;
+};
+
+export type WatchSyncPayload = {
+  room_id: string;
+  host_device_id: string;
+  action: string;
+  time: number;
+  playback_rate: number;
+  is_playing: boolean;
+  sent_at: number;
+};
+
+export type WatchJoinResponse = {
+  accepted: boolean;
+  reason: string | null;
+  room: WatchRoom | null;
+  sync: WatchSyncPayload | null;
+};
+
+export type WatchActivation = {
+  room: WatchRoom;
+  is_host: boolean;
+  is_member: boolean;
+};
+
+export type WatchBounds = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  visible: boolean;
 };
 
 export type ShareItem = {

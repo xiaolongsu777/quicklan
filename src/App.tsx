@@ -29,6 +29,7 @@ import {
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   acceptTransfer,
+  applyWatchSync,
   addSharePaths,
   checkForUpdate,
   chooseAvatar,
@@ -36,9 +37,11 @@ import {
   chooseFolderPath,
   chooseSharePaths,
   createChatRoom,
+  createWatchRoom,
   deleteChatRoom,
   discoverIp,
   downloadShare,
+  endWatchRoom,
   getAppInfo,
   getControlApiInfo,
   getLibrarySettings,
@@ -51,14 +54,24 @@ import {
   listChatRooms,
   listDevices,
   listMyShares,
+  listWatchChatMessages,
+  listWatchRooms,
   listSharedResources,
   openPathLocation,
   clearFinishedTransfers,
+  closeWatchWebview,
   rejectTransfer,
   removeTransferRecord,
   removeShare,
+  activateWatchRoom,
+  hideWatchWebview,
+  joinWatchRoom,
+  leaveWatchRoom,
   sendChatMessage,
   sendFiles,
+  sendWatchChatMessage,
+  setWatchWebviewBounds,
+  submitWatchRoomUrl,
   updateDeviceNote,
   updateLibrarySettings,
   updateNickname,
@@ -79,11 +92,18 @@ import type {
   TransferInfo,
   TransferPayload,
   UpdateInfo,
+  WatchActivation,
+  WatchBounds,
+  WatchChatMessage,
+  WatchJoinResponse,
+  WatchRoom,
+  WatchSyncPayload,
 } from "./types";
 import defaultAvatarUrl from "./assets/normal.jpg";
 import "./styles.css";
 
 type Tab = "devices" | "store" | "mine" | "chat" | "settings";
+type ChatSection = "chat" | "watch";
 
 function unwrapTransfer(payload: TransferPayload): TransferInfo {
   if ("transfer" in payload) return payload.transfer;
@@ -94,6 +114,9 @@ export default function App() {
   const params = new URLSearchParams(window.location.search);
   if (params.get("mode") === "incoming") {
     return <IncomingWindow transferId={params.get("transfer_id") ?? ""} />;
+  }
+  if (params.get("mode") === "watch-empty") {
+    return <main className="watch-empty-shell" />;
   }
   return <MainWindow />;
 }
@@ -109,6 +132,23 @@ function MainWindow() {
   const [selectedRoomId, setSelectedRoomId] = useState("main");
   const selectedRoomIdRef = useRef("main");
   const [chatDraft, setChatDraft] = useState("");
+  const [chatSection, setChatSection] = useState<ChatSection>("chat");
+  const [watchRooms, setWatchRooms] = useState<WatchRoom[]>([]);
+  const [watchMessages, setWatchMessages] = useState<WatchChatMessage[]>([]);
+  const [selectedWatchRoomId, setSelectedWatchRoomId] = useState<string | null>(null);
+  const selectedWatchRoomIdRef = useRef<string | null>(null);
+  const [watchDraft, setWatchDraft] = useState("");
+  const [watchCreateOpen, setWatchCreateOpen] = useState(false);
+  const [watchJoinPasswordOpen, setWatchJoinPasswordOpen] = useState(false);
+  const [watchTitleDraft, setWatchTitleDraft] = useState("");
+  const [watchPrivateDraft, setWatchPrivateDraft] = useState(false);
+  const [watchPasswordDraft, setWatchPasswordDraft] = useState("");
+  const [watchJoinPassword, setWatchJoinPassword] = useState("");
+  const [pendingJoinRoom, setPendingJoinRoom] = useState<WatchRoom | null>(null);
+  const [watchUrlDraft, setWatchUrlDraft] = useState("");
+  const [watchActivation, setWatchActivation] = useState<WatchActivation | null>(null);
+  const [pendingWatchSync, setPendingWatchSync] = useState<WatchSyncPayload | null>(null);
+  const watchViewportRef = useRef<HTMLDivElement | null>(null);
   const [roomNameDraft, setRoomNameDraft] = useState("");
   const [roomMemberDraft, setRoomMemberDraft] = useState<string[]>([]);
   const [roomDialogOpen, setRoomDialogOpen] = useState(false);
@@ -140,11 +180,18 @@ function MainWindow() {
 
   const selectedDevice = devices.find((device) => device.id === selectedDeviceId);
   const selectedRoom = chatRooms.find((room) => room.room_id === selectedRoomId) ?? chatRooms[0];
+  const selectedWatchRoom = selectedWatchRoomId
+    ? watchRooms.find((room) => room.room_id === selectedWatchRoomId) ?? null
+    : null;
   const onlineCount = devices.filter((device) => device.online).length;
 
   useEffect(() => {
     selectedRoomIdRef.current = selectedRoomId;
   }, [selectedRoomId]);
+
+  useEffect(() => {
+    selectedWatchRoomIdRef.current = selectedWatchRoomId;
+  }, [selectedWatchRoomId]);
 
   const filteredShares = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -204,6 +251,26 @@ function MainWindow() {
         setChatMessages((current) => current.filter((message) => message.room_id !== event.payload));
         setSelectedRoomId("main");
       }),
+      listen<WatchRoom>("watch-room-updated", (event) => {
+        setWatchRooms((current) => upsertWatchRoom(current, event.payload));
+        if (selectedWatchRoomIdRef.current === event.payload.room_id) {
+          setWatchUrlDraft(event.payload.current_url ?? "");
+        }
+      }),
+      listen<string>("watch-room-deleted", (event) => {
+        setWatchRooms((current) => current.filter((room) => room.room_id !== event.payload));
+        setWatchMessages((current) => current.filter((message) => message.room_id !== event.payload));
+        if (selectedWatchRoomIdRef.current === event.payload) {
+          setSelectedWatchRoomId(null);
+          setWatchActivation(null);
+          setWatchMessages([]);
+          setWatchUrlDraft("");
+          void closeWatchWebview();
+        }
+      }),
+      listen<WatchChatMessage>("watch-chat-message-received", (event) => {
+        upsertWatchMessage(event.payload);
+      }),
       getCurrentWebview().onDragDropEvent((event) => {
         const payload = event.payload;
         if (payload.type !== "drop" || payload.paths.length === 0) return;
@@ -240,6 +307,7 @@ function MainWindow() {
     setAppInfo(info);
     await refreshShares();
     await refreshChat("main");
+    await refreshWatch();
   }
 
   async function refreshShares() {
@@ -260,6 +328,18 @@ function MainWindow() {
     setChatRooms(await listChatRooms());
   }
 
+  async function refreshWatch(roomId = selectedWatchRoomIdRef.current) {
+    const rooms = await listWatchRooms();
+    setWatchRooms(rooms);
+    const nextRoomId = roomId && rooms.some((room) => room.room_id === roomId) ? roomId : null;
+    setSelectedWatchRoomId(nextRoomId);
+    if (nextRoomId) {
+      setWatchMessages(await listWatchChatMessages(nextRoomId));
+    } else {
+      setWatchMessages([]);
+    }
+  }
+
   function upsertTransfer(next: TransferInfo) {
     setTransfers((current) => {
       const rest = current.filter((transfer) => transfer.id !== next.id);
@@ -272,6 +352,14 @@ function MainWindow() {
       if (next.room_id !== selectedRoomIdRef.current) return current;
       if (current.some((message) => message.message_id === next.message_id)) return current;
       return [...current, next].slice(-100);
+    });
+  }
+
+  function upsertWatchMessage(next: WatchChatMessage) {
+    setWatchMessages((current) => {
+      if (next.room_id !== selectedWatchRoomIdRef.current) return current;
+      if (current.some((message) => message.message_id === next.message_id)) return current;
+      return [...current, next].slice(-200);
     });
   }
 
@@ -311,6 +399,87 @@ function MainWindow() {
     await downloadShare(share.share_id, password);
     setTransfersOpen(true);
   }
+
+  useEffect(() => {
+    if (!selectedWatchRoom) {
+      setWatchActivation(null);
+      setPendingWatchSync(null);
+      setWatchMessages([]);
+      setWatchUrlDraft("");
+      void hideWatchWebview();
+      return;
+    }
+    setWatchUrlDraft(selectedWatchRoom.current_url ?? "");
+    void activateWatchRoom(selectedWatchRoom.room_id)
+      .then((activation) => {
+        setWatchActivation(activation);
+        if (!activation.is_member) {
+          setWatchMessages([]);
+        }
+      })
+      .catch((err) => setError(err instanceof Error ? err.message : String(err)));
+  }, [selectedWatchRoom?.room_id, selectedWatchRoom?.current_url]);
+
+  useEffect(() => {
+    if (!selectedWatchRoom?.room_id || !watchActivation?.is_member) {
+      setWatchMessages([]);
+      return;
+    }
+    void listWatchChatMessages(selectedWatchRoom.room_id)
+      .then(setWatchMessages)
+      .catch((err) => setError(err instanceof Error ? err.message : String(err)));
+  }, [selectedWatchRoom?.room_id, watchActivation?.is_member]);
+
+  useEffect(() => {
+    if (!pendingWatchSync || !watchActivation?.is_member || selectedWatchRoom?.room_id !== pendingWatchSync.room_id) {
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      void applyWatchSync(pendingWatchSync).catch((err) =>
+        setError(err instanceof Error ? err.message : String(err)),
+      );
+      setPendingWatchSync(null);
+    }, 900);
+    return () => window.clearTimeout(timer);
+  }, [pendingWatchSync, watchActivation?.is_member, selectedWatchRoom?.room_id]);
+
+  useEffect(() => {
+    if (tab !== "chat" || chatSection !== "watch") {
+      void hideWatchWebview();
+      return;
+    }
+    const element = watchViewportRef.current;
+    if (!element || !selectedWatchRoom?.current_url) return;
+
+    let frame = 0;
+    const syncBounds = () => {
+      frame = 0;
+      const rect = element.getBoundingClientRect();
+      const scale = window.devicePixelRatio || 1;
+      const bounds: WatchBounds = {
+        x: rect.left * scale,
+        y: rect.top * scale,
+        width: rect.width * scale,
+        height: rect.height * scale,
+        visible: rect.width > 1 && rect.height > 1,
+      };
+      void setWatchWebviewBounds(bounds).catch((err) =>
+        setError(err instanceof Error ? err.message : String(err)),
+      );
+    };
+    const requestSync = () => {
+      if (frame) return;
+      frame = window.requestAnimationFrame(syncBounds);
+    };
+    requestSync();
+    window.addEventListener("scroll", requestSync, true);
+    window.addEventListener("resize", requestSync);
+    return () => {
+      if (frame) window.cancelAnimationFrame(frame);
+      window.removeEventListener("scroll", requestSync, true);
+      window.removeEventListener("resize", requestSync);
+    };
+  }, [tab, chatSection, selectedWatchRoom?.room_id, selectedWatchRoom?.current_url]);
 
   return (
     <main className="shell">
@@ -489,38 +658,146 @@ function MainWindow() {
       )}
 
       {tab === "chat" && (
-        <ChatTab
-          rooms={chatRooms}
-          messages={chatMessages}
-          selectedRoom={selectedRoom}
-          devices={devices}
-          draft={chatDraft}
-          busy={busy}
-          onDraft={setChatDraft}
-          onSelectRoom={(roomId) =>
-            void runAction(async () => {
-              setSelectedRoomId(roomId);
-              setChatMessages(await listChatMessages(roomId));
-            })
+        <ChatPage
+          section={chatSection}
+          onSectionChange={setChatSection}
+          chatContent={
+            <ChatTab
+              rooms={chatRooms}
+              messages={chatMessages}
+              selectedRoom={selectedRoom}
+              devices={devices}
+              draft={chatDraft}
+              busy={busy}
+              onDraft={setChatDraft}
+              onSelectRoom={(roomId) =>
+                void runAction(async () => {
+                  setSelectedRoomId(roomId);
+                  setChatMessages(await listChatMessages(roomId));
+                })
+              }
+              onOpenCreate={() => {
+                setRoomNameDraft("");
+                setRoomMemberDraft([]);
+                setRoomDialogOpen(true);
+              }}
+              onDeleteRoom={(roomId) =>
+                void runAction(async () => {
+                  await deleteChatRoom(roomId);
+                  await refreshChat("main");
+                }, "Chat room deleted")
+              }
+              onSend={() =>
+                void runAction(async () => {
+                  if (!selectedRoom) throw new Error("Select a chat room first");
+                  const payload = await sendChatMessage(selectedRoom.room_id, chatDraft);
+                  setChatDraft("");
+                  upsertChatMessage(payload.message);
+                })
+              }
+            />
           }
-          onOpenCreate={() => {
-            setRoomNameDraft("");
-            setRoomMemberDraft([]);
-            setRoomDialogOpen(true);
-          }}
-          onDeleteRoom={(roomId) =>
-            void runAction(async () => {
-              await deleteChatRoom(roomId);
-              await refreshChat("main");
-            }, "聊天室已删除")
-          }
-          onSend={() =>
-            void runAction(async () => {
-              if (!selectedRoom) throw new Error("请先选择聊天室");
-              const payload = await sendChatMessage(selectedRoom.room_id, chatDraft);
-              setChatDraft("");
-              upsertChatMessage(payload.message);
-            })
+          watchContent={
+            <WatchTab
+              localDeviceId={appInfo?.device_id ?? null}
+              rooms={watchRooms}
+              messages={watchMessages}
+              selectedRoom={selectedWatchRoom}
+              activation={watchActivation}
+              devices={devices}
+              draft={watchDraft}
+              urlDraft={watchUrlDraft}
+              busy={busy}
+              viewportRef={watchViewportRef}
+              onDraft={setWatchDraft}
+              onUrlDraft={setWatchUrlDraft}
+              onSelectRoom={(roomId) =>
+                void runAction(async () => {
+                  setSelectedWatchRoomId(roomId);
+                  setWatchMessages([]);
+                })
+              }
+              onOpenCreate={() => {
+                setWatchTitleDraft("");
+                setWatchPrivateDraft(false);
+                setWatchPasswordDraft("");
+                setWatchCreateOpen(true);
+              }}
+              onRoomAction={(room) =>
+                void runAction(async () => {
+                  if (appInfo?.device_id && room.host_device_id === appInfo.device_id) {
+                    return;
+                  }
+                  if (appInfo?.device_id && room.member_ids.includes(appInfo.device_id)) {
+                    await leaveWatchRoom(room.room_id);
+                    if (selectedWatchRoomIdRef.current === room.room_id) {
+                      setSelectedWatchRoomId(null);
+                      setWatchActivation(null);
+                      setPendingWatchSync(null);
+                      setWatchMessages([]);
+                      setWatchUrlDraft("");
+                      await closeWatchWebview();
+                    }
+                    await refreshWatch(selectedWatchRoomIdRef.current === room.room_id ? null : selectedWatchRoomIdRef.current);
+                    return;
+                  }
+                  if (room.is_private) {
+                    setPendingJoinRoom(room);
+                    setWatchJoinPassword("");
+                    setWatchJoinPasswordOpen(true);
+                    return;
+                  }
+                  const joined = await joinWatchRoom(room.room_id, null);
+                  if (!joined.accepted || !joined.room) {
+                    throw new Error(joined.reason ?? "Join watch room failed");
+                  }
+                  setSelectedWatchRoomId(joined.room.room_id);
+                  await refreshWatch(joined.room.room_id);
+                })
+              }
+              onLeaveRoom={() =>
+                void runAction(async () => {
+                  if (!selectedWatchRoom) return;
+                  await leaveWatchRoom(selectedWatchRoom.room_id);
+                  setSelectedWatchRoomId(null);
+                  setWatchActivation(null);
+                  setPendingWatchSync(null);
+                  setWatchMessages([]);
+                  setWatchUrlDraft("");
+                  await closeWatchWebview();
+                  await refreshWatch(null);
+                }, "Left watch room")
+              }
+              onEndRoom={() =>
+                void runAction(async () => {
+                  if (!selectedWatchRoom) return;
+                  await endWatchRoom(selectedWatchRoom.room_id);
+                  setSelectedWatchRoomId(null);
+                  setWatchActivation(null);
+                  setPendingWatchSync(null);
+                  setWatchMessages([]);
+                  setWatchUrlDraft("");
+                  await closeWatchWebview();
+                  await refreshWatch(null);
+                }, "Watch room ended")
+              }
+              onSend={() =>
+                void runAction(async () => {
+                  if (!selectedWatchRoom) throw new Error("Please select a watch room first");
+                  const message = await sendWatchChatMessage(selectedWatchRoom.room_id, watchDraft);
+                  setWatchDraft("");
+                  upsertWatchMessage(message);
+                })
+              }
+              onSubmitUrl={() =>
+                void runAction(async () => {
+                  if (!selectedWatchRoom) throw new Error("Please select a watch room first");
+                  const room = await submitWatchRoomUrl(selectedWatchRoom.room_id, watchUrlDraft);
+                  setWatchRooms((current) => upsertWatchRoom(current, room));
+                  setWatchUrlDraft(room.current_url ?? "");
+                }, "Video link updated")
+              }
+            />
           }
         />
       )}
@@ -668,6 +945,119 @@ function MainWindow() {
                 }
               >
                 <Save size={16} /> 保存
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {watchJoinPasswordOpen && pendingJoinRoom && (
+        <div className="modal-backdrop">
+          <div className="modal">
+            <h2>加入私密观影房间</h2>
+            <p className="muted">{pendingJoinRoom.title}</p>
+            <input
+              type="password"
+              value={watchJoinPassword}
+              onChange={(event) => setWatchJoinPassword(event.target.value)}
+              placeholder="输入房间密码"
+              autoFocus
+            />
+            <div className="modal-actions">
+              <button
+                onClick={() => {
+                  setWatchJoinPasswordOpen(false);
+                  setPendingJoinRoom(null);
+                  setWatchJoinPassword("");
+                }}
+              >
+                取消
+              </button>
+              <button
+                className="primary"
+                onClick={() =>
+                  void runAction(async () => {
+                    const joined = await joinWatchRoom(
+                      pendingJoinRoom.room_id,
+                      await sha256Text(watchJoinPassword),
+                    );
+                    if (!joined.accepted || !joined.room) {
+                      throw new Error(joined.reason ?? "加入观影房间失败");
+                    }
+                    setPendingWatchSync(joined.sync ?? null);
+                    setWatchJoinPasswordOpen(false);
+                    setPendingJoinRoom(null);
+                    setWatchJoinPassword("");
+                    setSelectedWatchRoomId(joined.room.room_id);
+                    await refreshWatch(joined.room.room_id);
+                  }, "已加入观影房间")
+                }
+              >
+                加入
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {watchCreateOpen && (
+        <div className="modal-backdrop">
+          <div className="modal">
+            <h2>创建观影房间</h2>
+            <input
+              value={watchTitleDraft}
+              onChange={(event) => setWatchTitleDraft(event.target.value)}
+              placeholder="房间名称（可选）"
+              autoFocus
+              maxLength={48}
+            />
+            <label>
+              <span>访问方式</span>
+              <select
+                value={watchPrivateDraft ? "private" : "public"}
+                onChange={(event) => setWatchPrivateDraft(event.target.value === "private")}
+              >
+                <option value="public">公开房间</option>
+                <option value="private">私密房间</option>
+              </select>
+            </label>
+            {watchPrivateDraft && (
+              <input
+                type="password"
+                value={watchPasswordDraft}
+                onChange={(event) => setWatchPasswordDraft(event.target.value)}
+                placeholder="房间密码"
+              />
+            )}
+            <div className="modal-actions">
+              <button
+                onClick={() => {
+                  setWatchCreateOpen(false);
+                  setWatchTitleDraft("");
+                  setWatchPrivateDraft(false);
+                  setWatchPasswordDraft("");
+                }}
+              >
+                取消
+              </button>
+              <button
+                className="primary"
+                onClick={() =>
+                  void runAction(async () => {
+                    const room = await createWatchRoom(
+                      watchTitleDraft,
+                      watchPrivateDraft,
+                      watchPrivateDraft ? await sha256Text(watchPasswordDraft) : null,
+                    );
+                    setWatchCreateOpen(false);
+                    setWatchTitleDraft("");
+                    setWatchPrivateDraft(false);
+                    setWatchPasswordDraft("");
+                    setChatSection("watch");
+                    setSelectedWatchRoomId(room.room_id);
+                    await refreshWatch(room.room_id);
+                  }, "观影房间已创建")
+                }
+              >
+                <Plus size={16} /> 创建
               </button>
             </div>
           </div>
@@ -1019,6 +1409,14 @@ function ChatTab(props: {
   onDeleteRoom: (roomId: string) => void;
   onSend: () => void;
 }) {
+  const messagesRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    const element = messagesRef.current;
+    if (!element) return;
+    element.scrollTop = element.scrollHeight;
+  }, [props.selectedRoom?.room_id, props.messages.length]);
+
   return (
     <section className="chat-layout">
       <section className="panel stack chat-sidebar">
@@ -1063,7 +1461,7 @@ function ChatTab(props: {
                 </button>
               )}
             </div>
-            <div className="chat-messages">
+            <div className="chat-messages" ref={messagesRef}>
               {props.messages.length === 0 ? (
                 <Empty icon={<MessageCircle size={34} />} text="暂无消息" />
               ) : (
@@ -1102,6 +1500,208 @@ function ChatTab(props: {
         ) : (
           <Empty icon={<MessageCircle size={34} />} text="暂无聊天室" />
         )}
+      </section>
+    </section>
+  );
+}
+
+function ChatPage(props: {
+  section: ChatSection;
+  onSectionChange: (value: ChatSection) => void;
+  chatContent: React.ReactNode;
+  watchContent: React.ReactNode;
+}) {
+  return (
+    <section className="stack">
+      <div className="subtabs">
+        <button
+          className={`tab ${props.section === "chat" ? "active" : ""}`}
+          onClick={() => props.onSectionChange("chat")}
+        >
+          聊天
+        </button>
+        <button
+          className={`tab ${props.section === "watch" ? "active" : ""}`}
+          onClick={() => props.onSectionChange("watch")}
+        >
+          观影
+        </button>
+      </div>
+      {props.section === "chat" ? props.chatContent : props.watchContent}
+    </section>
+  );
+}
+
+function WatchTab(props: {
+  localDeviceId: string | null;
+  rooms: WatchRoom[];
+  messages: WatchChatMessage[];
+  selectedRoom: WatchRoom | null;
+  activation: WatchActivation | null;
+  devices: DeviceInfo[];
+  draft: string;
+  urlDraft: string;
+  busy: boolean;
+  viewportRef: React.RefObject<HTMLDivElement>;
+  onDraft: (value: string) => void;
+  onUrlDraft: (value: string) => void;
+  onSelectRoom: (roomId: string) => void;
+  onOpenCreate: () => void;
+  onRoomAction: (room: WatchRoom) => void;
+  onLeaveRoom: () => void;
+  onEndRoom: () => void;
+  onSend: () => void;
+  onSubmitUrl: () => void;
+}) {
+  const canSend = !!props.selectedRoom && !!props.draft.trim();
+  const isHost = props.activation?.is_host ?? false;
+  const messagesRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    const element = messagesRef.current;
+    if (!element) return;
+    element.scrollTop = element.scrollHeight;
+  }, [props.selectedRoom?.room_id, props.messages.length]);
+
+  return (
+    <section className="watch-layout">
+      <section className="panel stack watch-sidebar">
+        <div className="panel-title">
+          <h2>观影房间</h2>
+          <button className="secondary compact" onClick={props.onOpenCreate}>
+            <Plus size={15} /> 创建
+          </button>
+        </div>
+        <div className="watch-room-list">
+          {props.rooms.length === 0 ? (
+            <Empty icon={<Library size={28} />} text="还没有可加入的观影房间" />
+          ) : (
+            props.rooms.map((room) => {
+              const selected = props.selectedRoom?.room_id === room.room_id;
+              const isHostRoom = !!props.localDeviceId && room.host_device_id === props.localDeviceId;
+              const isMember = !!props.localDeviceId && room.member_ids.includes(props.localDeviceId);
+              const actionLabel = isHostRoom ? "房主" : isMember ? "离开" : "进入";
+              return (
+                <article
+                  className={`watch-room-card ${selected ? "active" : ""}`}
+                  key={room.room_id}
+                  onClick={() => props.onSelectRoom(room.room_id)}
+                >
+                  <div className="watch-room-card-head">
+                    <strong>{room.title}</strong>
+                    <span className="pill">{room.is_private ? "密码" : "公开"}</span>
+                  </div>
+                  <p className="muted">房主：{room.host_name} · {room.member_ids.length} 人</p>
+                  <p className="muted">视频：{room.current_url ? simplifyVideoUrl(room.current_url) : "等待房主提交链接"}</p>
+                  <button
+                    className="primary compact"
+                    disabled={props.busy || isHostRoom}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      props.onRoomAction(room);
+                    }}
+                  >
+                    {actionLabel}
+                  </button>
+                </article>
+              );
+            })
+          )}
+        </div>
+      </section>
+
+      <section className="panel stack watch-main">
+        {props.selectedRoom ? (
+          <>
+            <div className="panel-title">
+              <div>
+                <h2>{props.selectedRoom.title}</h2>
+                <p className="muted">
+                  房主：{props.selectedRoom.host_name} · {props.selectedRoom.member_ids.length} 人 ·{" "}
+                  {props.selectedRoom.is_private ? "密码房" : "公开房"}
+                </p>
+              </div>
+              <div className="row-actions">
+                {isHost && (
+                  <button className="icon-button danger" title="结束房间" onClick={props.onEndRoom}>
+                    <Trash2 size={15} />
+                  </button>
+                )}
+              </div>
+            </div>
+            {isHost && (
+              <div className="watch-url-bar">
+                <input
+                  value={props.urlDraft}
+                  onChange={(event) => props.onUrlDraft(event.target.value)}
+                  placeholder="提交或替换视频网页链接（http/https）"
+                />
+                <button className="primary" disabled={props.busy || !props.urlDraft.trim()} onClick={props.onSubmitUrl}>
+                  提交链接
+                </button>
+              </div>
+            )}
+            <div className="watch-player-frame" ref={props.viewportRef}>
+              {!props.selectedRoom.current_url ? (
+                <div className="watch-player-placeholder">
+                  <strong>等待房主提交视频链接</strong>
+                  <p className="muted">房间和右侧聊天已经可用，房主提交后会直接加载到这里。</p>
+                </div>
+              ) : (
+                <div className="watch-player-placeholder ready">
+                  <strong>视频正在内嵌窗口中播放</strong>
+                  <p className="muted">切换其它页面时会隐藏播放器，但后台不会暂停。</p>
+                </div>
+              )}
+            </div>
+          </>
+        ) : (
+          <Empty icon={<Library size={30} />} text="选择一个观影房间开始观看" />
+        )}
+      </section>
+
+      <section className="panel stack watch-chat-panel">
+        <div className="panel-title">
+          <div>
+            <h2>房间聊天</h2>
+            <p className="muted">这是观影室独立聊天，不会进入普通聊天室。</p>
+          </div>
+        </div>
+        <div className="chat-messages" ref={messagesRef}>
+          {props.messages.length === 0 ? (
+            <Empty icon={<MessageCircle size={30} />} text="暂时还没有观影聊天消息" />
+          ) : (
+            props.messages.map((message) => (
+              <article className="chat-message" key={message.message_id}>
+                <img className="avatar" src={messageAvatarSrc(message, props.devices)} alt="" onError={useDefaultAvatar} />
+                <div>
+                  <div className="chat-message-head">
+                    <strong>{messageSenderName(message, props.devices)}</strong>
+                    <span>{formatDateTime(message.created_at)}</span>
+                  </div>
+                  <p>{message.body}</p>
+                </div>
+              </article>
+            ))
+          )}
+        </div>
+        <div className="chat-input">
+          <textarea
+            value={props.draft}
+            onChange={(event) => props.onDraft(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter' && !event.shiftKey) {
+                event.preventDefault();
+                props.onSend();
+              }
+            }}
+            placeholder="发送观影室聊天消息"
+            rows={2}
+          />
+          <button className="primary" disabled={!canSend || props.busy} onClick={props.onSend}>
+            <Send size={16} /> 发送
+          </button>
+        </div>
       </section>
     </section>
   );
@@ -1478,8 +2078,30 @@ function upsertRoom(rooms: ChatRoom[], room: ChatRoom) {
   );
 }
 
+function upsertWatchRoom(rooms: WatchRoom[], room: WatchRoom) {
+  const rest = rooms.filter((item) => item.room_id !== room.room_id);
+  return [room, ...rest].sort((a, b) => b.created_at - a.created_at || a.title.localeCompare(b.title));
+}
+
 function basename(path: string) {
   return path.split(/[\\/]/).pop() ?? path;
+}
+
+function simplifyVideoUrl(url: string) {
+  try {
+    const parsed = new URL(url);
+    return parsed.hostname.replace(/^www\./, "");
+  } catch {
+    return url;
+  }
+}
+
+async function sha256Text(value: string) {
+  const data = new TextEncoder().encode(value);
+  const digest = await crypto.subtle.digest("SHA-256", data);
+  return Array.from(new Uint8Array(digest))
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
 }
 
 function formatDateTime(seconds: number) {

@@ -8,17 +8,23 @@ mod protocol;
 mod settings;
 mod storage;
 mod transfer;
+mod watch;
+mod watch_player;
 
 use chat::ChatService;
 use commands::{
     accept_transfer, add_share_paths, check_for_update, choose_avatar, choose_download_dir,
+    broadcast_local_watch_rooms, broadcast_watch_room_end_for_state,
     choose_folder_path, choose_share_paths, clear_finished_transfers, create_chat_room,
     delete_chat_room, discover_ip, download_share, get_app_info, get_control_api_info,
     get_library_settings, get_network_status, get_settings, get_transfer, get_transfers,
     install_update, list_chat_messages, list_chat_rooms, list_devices, list_my_shares,
-    list_shared_resources, open_path_location, reject_transfer, remove_share,
-    remove_transfer_record, send_chat_message, send_files, update_device_note,
-    update_library_settings, update_nickname, update_share,
+    list_shared_resources, list_watch_chat_messages, list_watch_rooms, open_path_location,
+    reject_transfer, remove_share, remove_transfer_record, send_chat_message,
+    send_files, send_watch_chat_message, set_watch_webview_bounds, submit_watch_room_url,
+    update_device_note, update_library_settings, update_nickname, update_share,
+    activate_watch_room, apply_watch_sync, close_watch_webview, create_watch_room, end_watch_room,
+    hide_watch_webview, join_watch_room, leave_watch_room,
 };
 use discovery::DiscoveryService;
 use library::LibraryService;
@@ -26,6 +32,7 @@ use protocol::LAN_API_PORT;
 use serde::Serialize;
 use settings::SettingsService;
 use std::{
+    collections::HashSet,
     io::{Read, Write},
     net::TcpStream as StdTcpStream,
     time::Duration,
@@ -36,6 +43,8 @@ use tauri::{
     Manager, WindowEvent,
 };
 use transfer::TransferService;
+use watch::WatchService;
+use watch_player::WatchPlayerController;
 
 const CONTROL_API_BIND: &str = "127.0.0.1:45456";
 
@@ -48,6 +57,7 @@ pub struct ControlApiInfo {
 #[derive(Clone, Serialize)]
 pub struct AppInfo {
     pub version: &'static str,
+    pub device_id: String,
 }
 
 pub struct AppState {
@@ -56,6 +66,8 @@ pub struct AppState {
     pub settings: SettingsService,
     pub library: LibraryService,
     pub chat: ChatService,
+    pub watch: WatchService,
+    pub watch_player: WatchPlayerController,
     pub control_api: ControlApiInfo,
 }
 
@@ -157,11 +169,13 @@ pub fn run() {
             let library = LibraryService::load(device_id, settings.nickname())
                 .map_err(|err| format!("failed to load library: {err}"))?;
             let chat = ChatService::load(library.device_id());
+            let watch = WatchService::load(library.device_id());
             let api_port = lan_api::start(
                 app_handle.clone(),
                 library.clone(),
                 settings.clone(),
                 chat.clone(),
+                watch.clone(),
                 LAN_API_PORT,
             );
             let transfer = TransferService::new(
@@ -194,9 +208,33 @@ pub fn run() {
                 settings,
                 library,
                 chat,
+                watch,
+                watch_player: WatchPlayerController::new(),
                 control_api: control_api.clone(),
             };
             app.manage(state);
+            let app_for_watch_broadcast = app_handle.clone();
+            tauri::async_runtime::spawn(async move {
+                let mut previous_hosted_rooms = HashSet::<String>::new();
+                loop {
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    if let Some(state) = app_for_watch_broadcast.try_state::<AppState>() {
+                        let local_id = state.library.device_id();
+                        let current_hosted_rooms = state
+                            .watch
+                            .list_rooms()
+                            .into_iter()
+                            .filter(|room| room.host_device_id == local_id)
+                            .map(|room| room.room_id)
+                            .collect::<HashSet<_>>();
+                        for room_id in previous_hosted_rooms.difference(&current_hosted_rooms) {
+                            broadcast_watch_room_end_for_state(&state, room_id);
+                        }
+                        broadcast_local_watch_rooms(&state);
+                        previous_hosted_rooms = current_hosted_rooms;
+                    }
+                }
+            });
             control_api::start(app_handle, control_api.bind.clone());
             Ok(())
         })
@@ -264,7 +302,20 @@ pub fn run() {
             list_chat_messages,
             create_chat_room,
             delete_chat_room,
-            send_chat_message
+            send_chat_message,
+            list_watch_rooms,
+            list_watch_chat_messages,
+            create_watch_room,
+            join_watch_room,
+            leave_watch_room,
+            end_watch_room,
+            submit_watch_room_url,
+            send_watch_chat_message,
+            activate_watch_room,
+            set_watch_webview_bounds,
+            hide_watch_webview,
+            close_watch_webview,
+            apply_watch_sync
         ])
         .run(tauri::generate_context!())
         .expect("failed to run QuickLAN");

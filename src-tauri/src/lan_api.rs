@@ -3,6 +3,7 @@ use crate::{
     library::LibraryService,
     protocol::Manifest,
     settings::SettingsService,
+    watch::{WatchChatMessage, WatchJoinRequest, WatchRoom, WatchSyncPayload, WatchService},
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -13,7 +14,7 @@ use std::{
     path::Path,
     time::Duration,
 };
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
@@ -34,6 +35,7 @@ pub fn start(
     library: LibraryService,
     settings: SettingsService,
     chat: ChatService,
+    watch: WatchService,
     requested_port: u16,
 ) -> u16 {
     for port in requested_port..requested_port + 20 {
@@ -42,6 +44,7 @@ pub fn start(
         let library = library.clone();
         let settings = settings.clone();
         let chat = chat.clone();
+        let watch = watch.clone();
         let listener = std::net::TcpListener::bind(&bind);
         let Ok(listener) = listener else {
             continue;
@@ -65,8 +68,9 @@ pub fn start(
                 let library = library.clone();
                 let settings = settings.clone();
                 let chat = chat.clone();
+                let watch = watch.clone();
                 tauri::async_runtime::spawn(async move {
-                    let _ = handle_connection(app, library, settings, chat, stream).await;
+                    let _ = handle_connection(app, library, settings, chat, watch, stream).await;
                 });
             }
         });
@@ -80,6 +84,7 @@ async fn handle_connection(
     library: LibraryService,
     settings: SettingsService,
     chat: ChatService,
+    watch: WatchService,
     mut stream: TcpStream,
 ) -> Result<(), String> {
     let mut buf = vec![0_u8; 128 * 1024];
@@ -170,6 +175,68 @@ async fn handle_connection(
             if let Ok(req) = serde_json::from_str::<DeleteRoomRequest>(body) {
                 chat.remove_remote_room(&req.room_id)?;
                 let _ = app.emit("chat-room-deleted", req.room_id);
+            }
+            write_json(&mut stream, 202, json!({"ok":true})).await
+        }
+        ("POST", "/watch/rooms/update") => {
+            if let Ok(room) = serde_json::from_str::<WatchRoom>(body) {
+                watch.accept_room(room.clone())?;
+                let _ = app.emit("watch-room-updated", room);
+            }
+            write_json(&mut stream, 202, json!({"ok":true})).await
+        }
+        ("POST", "/watch/rooms/end") => {
+            if let Ok(req) = serde_json::from_str::<DeleteRoomRequest>(body) {
+                watch.remove_room(&req.room_id)?;
+                let _ = app.emit("watch-room-deleted", req.room_id);
+            }
+            write_json(&mut stream, 202, json!({"ok":true})).await
+        }
+        ("POST", "/watch/rooms/join") => {
+            if let Ok(request) = serde_json::from_str::<WatchJoinRequest>(body) {
+                let mut response = watch.join_room_request(request)?;
+                response.sync = app
+                    .try_state::<crate::AppState>()
+                    .and_then(|state| state.watch_player.current_sync(&app));
+                if let Some(room) = response.room.clone() {
+                    let _ = app.emit("watch-room-updated", room);
+                }
+                return write_json(&mut stream, 200, json!(response)).await;
+            }
+            write_json(&mut stream, 400, json!({"error":"bad_request"})).await
+        }
+        ("POST", "/watch/rooms/leave") => {
+            if let Ok(req) = serde_json::from_str::<serde_json::Value>(body) {
+                if let (Some(room_id), Some(user_id)) = (
+                    req.get("room_id").and_then(|value| value.as_str()),
+                    req.get("user_id").and_then(|value| value.as_str()),
+                ) {
+                    match watch.leave_room(room_id, user_id)? {
+                        Some(room) => {
+                            let _ = app.emit("watch-room-updated", room.clone());
+                            return write_json(&mut stream, 200, json!(room)).await;
+                        }
+                        None => {
+                            let _ = app.emit("watch-room-deleted", room_id.to_string());
+                        }
+                    }
+                }
+            }
+            write_json(&mut stream, 202, json!({"ok":true})).await
+        }
+        ("POST", "/watch/chat/messages") => {
+            if let Ok(message) = serde_json::from_str::<WatchChatMessage>(body) {
+                watch.accept_chat_message(message.clone())?;
+                let _ = app.emit("watch-chat-message-received", message);
+            }
+            write_json(&mut stream, 202, json!({"ok":true})).await
+        }
+        ("POST", "/watch/sync") => {
+            if let Ok(payload) = serde_json::from_str::<WatchSyncPayload>(body) {
+                if let Some(state) = app.try_state::<crate::AppState>() {
+                    let _ = state.watch_player.apply_sync(&app, &payload);
+                }
+                let _ = app.emit("watch-sync-received", payload);
             }
             write_json(&mut stream, 202, json!({"ok":true})).await
         }
