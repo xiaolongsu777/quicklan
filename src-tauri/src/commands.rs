@@ -2,6 +2,10 @@ use crate::{
     chat::{ChatMessage, ChatMessagePayload, ChatRoom, MAIN_ROOM_ID},
     protocol::{DeviceInfo, LibrarySettings, NetworkStatus, ShareItem, TransferInfo},
     settings::AppSettings,
+    watch::{
+        CreateWatchRoomInput, WatchContentBounds, WatchRoom, WatchRoomChatMessage,
+        WatchRoomSession, WatchSyncMessage,
+    },
     storage, AppInfo, AppState, ControlApiInfo,
 };
 use serde::{Deserialize, Serialize};
@@ -83,6 +87,130 @@ pub fn send_chat_message(
     )?;
     post_chat_message(&state, &payload);
     Ok(payload)
+}
+
+#[tauri::command]
+pub fn list_watch_rooms(state: State<'_, AppState>) -> Vec<WatchRoom> {
+    state.watch.list_rooms()
+}
+
+#[tauri::command]
+pub fn create_watch_room(
+    state: State<'_, AppState>,
+    input: CreateWatchRoomInput,
+) -> Result<WatchRoomSession, String> {
+    let session = state.watch.create_room(input)?;
+    let hint = format!(
+        "📺 {} 创建了同步观影房间，可在“观影”页面加入。",
+        state.settings.nickname()
+    );
+    let payload = state.chat.add_message(
+        MAIN_ROOM_ID.to_string(),
+        state.library.device_id(),
+        state.settings.nickname(),
+        state.settings.avatar_hash(),
+        hint,
+    )?;
+    post_chat_message(&state, &payload);
+    Ok(session)
+}
+
+#[tauri::command]
+pub fn update_watch_room_url(
+    state: State<'_, AppState>,
+    room_id: String,
+    url: String,
+) -> Result<WatchRoomSession, String> {
+    state.watch.update_room_url(&room_id, &url)
+}
+
+#[tauri::command]
+pub fn join_watch_room(
+    state: State<'_, AppState>,
+    room_id: String,
+    password: Option<String>,
+) -> Result<WatchRoomSession, String> {
+    state.watch.join_room(&room_id, password)
+}
+
+#[tauri::command]
+pub fn leave_watch_room(state: State<'_, AppState>, room_id: String) -> Result<(), String> {
+    state.watch.leave_room(&room_id)
+}
+
+#[tauri::command]
+pub fn end_watch_room(state: State<'_, AppState>, room_id: String) -> Result<(), String> {
+    state.watch.end_room(&room_id, "host_closed")
+}
+
+#[tauri::command]
+pub fn get_watch_room_session(
+    state: State<'_, AppState>,
+    room_id: String,
+) -> Option<WatchRoomSession> {
+    state.watch.get_session(&room_id)
+}
+
+#[tauri::command]
+pub fn open_watch_room_window(state: State<'_, AppState>, room_id: String) -> Result<(), String> {
+    state.watch.open_room_window(&room_id)
+}
+
+#[tauri::command]
+pub fn open_watch_content_webview(
+    state: State<'_, AppState>,
+    window_label: String,
+    room_id: String,
+    url: String,
+    bounds: WatchContentBounds,
+) -> Result<(), String> {
+    state
+        .watch
+        .open_content_webview(&window_label, &room_id, &url, bounds)
+}
+
+#[tauri::command]
+pub fn move_watch_content_webview(
+    state: State<'_, AppState>,
+    room_id: String,
+    bounds: WatchContentBounds,
+) -> Result<(), String> {
+    state.watch.move_content_webview(&room_id, bounds)
+}
+
+#[tauri::command]
+pub fn hide_watch_content_webview(state: State<'_, AppState>, room_id: String) -> Result<(), String> {
+    state.watch.hide_content_webview(&room_id)
+}
+
+#[tauri::command]
+pub fn close_watch_content_webview(state: State<'_, AppState>, room_id: String) -> Result<(), String> {
+    state.watch.close_content_webview(&room_id)
+}
+
+#[tauri::command]
+pub fn list_watch_room_messages(
+    state: State<'_, AppState>,
+    room_id: String,
+) -> Result<Vec<WatchRoomChatMessage>, String> {
+    state.watch.list_messages(&room_id)
+}
+
+#[tauri::command]
+pub fn send_watch_room_message(
+    state: State<'_, AppState>,
+    room_id: String,
+    body: String,
+) -> Result<WatchRoomChatMessage, String> {
+    state.watch.send_room_message(&room_id, &body)
+}
+
+#[tauri::command]
+pub fn send_watch_sync(
+    state: State<'_, AppState>,
+    message: WatchSyncMessage,
+) -> Result<(), String> {
+    state.watch.send_sync(message)
 }
 
 #[tauri::command]

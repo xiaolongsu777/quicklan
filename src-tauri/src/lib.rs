@@ -8,17 +8,22 @@ mod protocol;
 mod settings;
 mod storage;
 mod transfer;
+mod watch;
 
 use chat::ChatService;
 use commands::{
     accept_transfer, add_share_paths, check_for_update, choose_avatar, choose_download_dir,
     choose_folder_path, choose_share_paths, clear_finished_transfers, create_chat_room,
-    delete_chat_room, discover_ip, download_share, get_app_info, get_control_api_info,
-    get_library_settings, get_network_status, get_settings, get_transfer, get_transfers,
-    install_update, list_chat_messages, list_chat_rooms, list_devices, list_my_shares,
-    list_shared_resources, open_path_location, reject_transfer, remove_share,
-    remove_transfer_record, send_chat_message, send_files, update_device_note,
-    update_library_settings, update_nickname, update_share,
+    create_watch_room, delete_chat_room, discover_ip, download_share, end_watch_room,
+    get_app_info, get_control_api_info, get_library_settings, get_network_status, get_settings,
+    get_transfer, get_transfers, get_watch_room_session, install_update, join_watch_room,
+    leave_watch_room, list_chat_messages, list_chat_rooms, list_devices, list_my_shares,
+    list_shared_resources, list_watch_room_messages, list_watch_rooms, open_path_location,
+    open_watch_content_webview, open_watch_room_window, reject_transfer, remove_share,
+    remove_transfer_record, send_chat_message, send_files, send_watch_room_message,
+    send_watch_sync, update_device_note, update_library_settings, update_nickname, update_share,
+    update_watch_room_url, hide_watch_content_webview, move_watch_content_webview,
+    close_watch_content_webview,
 };
 use discovery::DiscoveryService;
 use library::LibraryService;
@@ -36,6 +41,7 @@ use tauri::{
     Manager, WindowEvent,
 };
 use transfer::TransferService;
+use watch::WatchRoomService;
 
 const CONTROL_API_BIND: &str = "127.0.0.1:45456";
 
@@ -56,6 +62,7 @@ pub struct AppState {
     pub settings: SettingsService,
     pub library: LibraryService,
     pub chat: ChatService,
+    pub watch: WatchRoomService,
     pub control_api: ControlApiInfo,
 }
 
@@ -157,11 +164,14 @@ pub fn run() {
             let library = LibraryService::load(device_id, settings.nickname())
                 .map_err(|err| format!("failed to load library: {err}"))?;
             let chat = ChatService::load(library.device_id());
+            let watch =
+                WatchRoomService::new(app_handle.clone(), settings.clone(), library.device_id());
             let api_port = lan_api::start(
                 app_handle.clone(),
                 library.clone(),
                 settings.clone(),
                 chat.clone(),
+                watch.clone(),
                 LAN_API_PORT,
             );
             let transfer = TransferService::new(
@@ -180,6 +190,7 @@ pub fn run() {
                 settings.clone(),
                 library.clone(),
             );
+            watch.set_discovery(discovery.clone());
 
             discovery.start();
 
@@ -194,6 +205,7 @@ pub fn run() {
                 settings,
                 library,
                 chat,
+                watch,
                 control_api: control_api.clone(),
             };
             app.manage(state);
@@ -222,6 +234,11 @@ pub fn run() {
         })
         .on_window_event(|window, event| {
             if window.label() != "main" {
+                if let WindowEvent::CloseRequested { .. } = event {
+                    if let Some(state) = window.app_handle().try_state::<AppState>() {
+                        state.watch.handle_window_close_requested(window.label());
+                    }
+                }
                 return;
             }
             if let WindowEvent::CloseRequested { api, .. } = event {
@@ -264,7 +281,22 @@ pub fn run() {
             list_chat_messages,
             create_chat_room,
             delete_chat_room,
-            send_chat_message
+            send_chat_message,
+            list_watch_rooms,
+            create_watch_room,
+            join_watch_room,
+            leave_watch_room,
+            end_watch_room,
+            get_watch_room_session,
+            open_watch_room_window,
+            open_watch_content_webview,
+            move_watch_content_webview,
+            hide_watch_content_webview,
+            close_watch_content_webview,
+            update_watch_room_url,
+            list_watch_room_messages,
+            send_watch_room_message,
+            send_watch_sync
         ])
         .run(tauri::generate_context!())
         .expect("failed to run QuickLAN");

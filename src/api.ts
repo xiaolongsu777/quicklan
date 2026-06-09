@@ -6,12 +6,19 @@ import type {
   ChatMessagePayload,
   ChatRoom,
   ControlApiInfo,
+  CreateWatchRoomInput,
   DeviceInfo,
   LibrarySettings,
   NetworkStatus,
   ShareItem,
   TransferInfo,
   UpdateInfo,
+  WatchContentBounds,
+  WatchRoom,
+  WatchRoomChatMessage,
+  WatchRoomEndMessage,
+  WatchRoomSession,
+  WatchSyncMessage,
 } from "./types";
 
 export function listDevices(): Promise<DeviceInfo[]> {
@@ -40,6 +47,76 @@ export function deleteChatRoom(roomId: string): Promise<void> {
 
 export function sendChatMessage(roomId: string, body: string): Promise<ChatMessagePayload> {
   return invoke<ChatMessagePayload>("send_chat_message", { roomId, body });
+}
+
+export function listWatchRooms(): Promise<WatchRoom[]> {
+  return invoke<WatchRoom[]>("list_watch_rooms");
+}
+
+export function createWatchRoom(input: CreateWatchRoomInput): Promise<WatchRoomSession> {
+  return invoke<WatchRoomSession>("create_watch_room", { input });
+}
+
+export function updateWatchRoomUrl(roomId: string, url: string): Promise<WatchRoomSession> {
+  return invoke<WatchRoomSession>("update_watch_room_url", { roomId, url });
+}
+
+export function joinWatchRoom(roomId: string, password?: string): Promise<WatchRoomSession> {
+  return invoke<WatchRoomSession>("join_watch_room", { roomId, password: password || null });
+}
+
+export function leaveWatchRoom(roomId: string): Promise<void> {
+  return invoke<void>("leave_watch_room", { roomId });
+}
+
+export function endWatchRoom(roomId: string): Promise<void> {
+  return invoke<void>("end_watch_room", { roomId });
+}
+
+export function getWatchRoomSession(roomId: string): Promise<WatchRoomSession | null> {
+  return invoke<WatchRoomSession | null>("get_watch_room_session", { roomId });
+}
+
+export function openWatchRoomWindow(roomId: string): Promise<void> {
+  return invoke<void>("open_watch_room_window", { roomId });
+}
+
+export function openWatchContentWebview(
+  windowLabel: string,
+  roomId: string,
+  url: string,
+  bounds: WatchContentBounds,
+): Promise<void> {
+  return invoke<void>("open_watch_content_webview", {
+    windowLabel,
+    roomId,
+    url,
+    bounds,
+  });
+}
+
+export function moveWatchContentWebview(roomId: string, bounds: WatchContentBounds): Promise<void> {
+  return invoke<void>("move_watch_content_webview", { roomId, bounds });
+}
+
+export function hideWatchContentWebview(roomId: string): Promise<void> {
+  return invoke<void>("hide_watch_content_webview", { roomId });
+}
+
+export function closeWatchContentWebview(roomId: string): Promise<void> {
+  return invoke<void>("close_watch_content_webview", { roomId });
+}
+
+export function listWatchRoomMessages(roomId: string): Promise<WatchRoomChatMessage[]> {
+  return invoke<WatchRoomChatMessage[]>("list_watch_room_messages", { roomId });
+}
+
+export function sendWatchRoomMessage(roomId: string, body: string): Promise<WatchRoomChatMessage> {
+  return invoke<WatchRoomChatMessage>("send_watch_room_message", { roomId, body });
+}
+
+export function sendWatchSync(message: WatchSyncMessage): Promise<void> {
+  return invoke<void>("send_watch_sync", { message });
 }
 
 export function sendFiles(targetId: string, filePaths: string[]): Promise<string> {

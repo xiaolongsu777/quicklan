@@ -113,6 +113,88 @@ export type ChatMessagePayload = {
   message: ChatMessage;
 };
 
+export type WatchRoomStatus = "active" | "ended";
+
+export type WatchRoom = {
+  room_id: string;
+  host_user_id: string;
+  host_name: string;
+  title: string;
+  url: string | null;
+  has_video_url: boolean;
+  is_private: boolean;
+  password_hash: string | null;
+  member_count: number;
+  status: WatchRoomStatus;
+  created_at: number;
+  updated_at: number;
+};
+
+export type CreateWatchRoomInput = {
+  title: string;
+  is_private: boolean;
+  password?: string | null;
+};
+
+export type WatchJoinResult = {
+  room_id: string;
+  target_user_id: string;
+  accepted: boolean;
+  reason: string | null;
+};
+
+export type WatchRoomSession = {
+  room: WatchRoom;
+  is_host: boolean;
+};
+
+export type WatchRoomChatMessage = {
+  message_id: string;
+  room_id: string;
+  sender_user_id: string;
+  sender_name: string;
+  body: string;
+  created_at: number;
+  system: boolean;
+};
+
+export type WatchRoomUrlUpdate = {
+  room_id: string;
+  host_user_id: string;
+  url: string | null;
+  updated_at: number;
+};
+
+export type WatchSyncMessage = {
+  room_id: string;
+  host_user_id: string;
+  action: string;
+  time: number;
+  playback_rate: number;
+  is_playing: boolean;
+  sent_at: number;
+};
+
+export type WatchRoomEndMessage = {
+  type: string;
+  room_id: string;
+  host_user_id: string;
+  reason: string;
+};
+
+export type WatchRoomVideoStatus = {
+  room_id: string;
+  phase: "idle" | "empty" | "detecting" | "ready" | "missing" | "error";
+  message: string;
+};
+
+export type WatchContentBounds = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
+
 export type ShareItem = {
   share_id: string;
   name: string;

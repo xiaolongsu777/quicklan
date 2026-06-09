@@ -5,6 +5,7 @@ import {
   Check,
   Clock,
   Download,
+  ExternalLink,
   FilePlus,
   FolderOpen,
   HardDrive,
@@ -26,7 +27,7 @@ import {
   UploadCloud,
   X,
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Component, type ErrorInfo, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import {
   acceptTransfer,
   addSharePaths,
@@ -36,9 +37,11 @@ import {
   chooseFolderPath,
   chooseSharePaths,
   createChatRoom,
+  createWatchRoom,
   deleteChatRoom,
   discoverIp,
   downloadShare,
+  endWatchRoom,
   getAppInfo,
   getControlApiInfo,
   getLibrarySettings,
@@ -46,12 +49,18 @@ import {
   getSettings,
   getTransfer,
   getTransfers,
+  getWatchRoomSession,
   installUpdate,
   listChatMessages,
   listChatRooms,
   listDevices,
   listMyShares,
   listSharedResources,
+  listWatchRoomMessages,
+  listWatchRooms,
+  moveWatchContentWebview,
+  openWatchContentWebview,
+  openWatchRoomWindow,
   openPathLocation,
   clearFinishedTransfers,
   rejectTransfer,
@@ -59,9 +68,15 @@ import {
   removeShare,
   sendChatMessage,
   sendFiles,
+  joinWatchRoom,
+  leaveWatchRoom,
+  sendWatchRoomMessage,
+  closeWatchContentWebview as closeWatchContentWebviewCommand,
+  hideWatchContentWebview as hideWatchContentWebviewCommand,
   updateDeviceNote,
   updateLibrarySettings,
   updateNickname,
+  updateWatchRoomUrl,
   updateShare,
 } from "./api";
 import type {
@@ -71,6 +86,7 @@ import type {
   ChatMessagePayload,
   ChatRoom,
   ControlApiInfo,
+  CreateWatchRoomInput,
   DeviceInfo,
   IncomingTransferPayload,
   LibrarySettings,
@@ -79,6 +95,13 @@ import type {
   TransferInfo,
   TransferPayload,
   UpdateInfo,
+  WatchJoinResult,
+  WatchContentBounds,
+  WatchRoom,
+  WatchRoomChatMessage,
+  WatchRoomEndMessage,
+  WatchRoomSession,
+  WatchRoomVideoStatus,
 } from "./types";
 import defaultAvatarUrl from "./assets/normal.jpg";
 import "./styles.css";
@@ -91,11 +114,72 @@ function unwrapTransfer(payload: TransferPayload): TransferInfo {
 }
 
 export default function App() {
+  useEffect(() => {
+    const boot = document.getElementById("boot");
+    if (boot) boot.style.display = "none";
+  }, []);
+
   const params = new URLSearchParams(window.location.search);
+  const currentWindowLabel = safeCurrentWindowLabel();
+  const derivedWatchRoomId = params.get("roomId") ?? currentWindowLabel.replace(/^watch-room-/, "");
   if (params.get("mode") === "incoming") {
-    return <IncomingWindow transferId={params.get("transfer_id") ?? ""} />;
+    return (
+      <AppErrorBoundary>
+        <IncomingWindow transferId={params.get("transfer_id") ?? ""} />
+      </AppErrorBoundary>
+    );
   }
-  return <MainWindow />;
+  if (params.get("mode") === "watch-room" || currentWindowLabel.startsWith("watch-room-")) {
+    return (
+      <AppErrorBoundary>
+        <WatchRoomWindowPage roomId={derivedWatchRoomId} />
+      </AppErrorBoundary>
+    );
+  }
+  return (
+    <AppErrorBoundary>
+      <MainWindow />
+    </AppErrorBoundary>
+  );
+}
+
+class AppErrorBoundary extends Component<{ children: ReactNode }, { error: string | null }> {
+  constructor(props: { children: ReactNode }) {
+    super(props);
+    this.state = { error: null };
+  }
+
+  static getDerivedStateFromError(error: unknown) {
+    return {
+      error: error instanceof Error ? error.stack || error.message : String(error),
+    };
+  }
+
+  componentDidCatch(error: unknown, info: ErrorInfo) {
+    console.error("[watch-room] render error", error, info);
+  }
+
+  render() {
+    if (this.state.error) {
+      return (
+        <main className="watch-room-shell">
+          <section className="watch-room-window debug-window">
+            <header className="watch-room-window-header">
+              <div className="watch-room-heading">
+                <p className="eyebrow">QuickLAN Debug</p>
+                <h1>Window Render Failed</h1>
+              </div>
+            </header>
+            <section className="panel stack">
+              <p className="muted">Copy this error block for debugging.</p>
+              <pre className="debug-pre">{this.state.error}</pre>
+            </section>
+          </section>
+        </main>
+      );
+    }
+    return this.props.children;
+  }
 }
 
 function MainWindow() {
@@ -106,12 +190,21 @@ function MainWindow() {
   const [transfers, setTransfers] = useState<TransferInfo[]>([]);
   const [chatRooms, setChatRooms] = useState<ChatRoom[]>([]);
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
+  const [watchRooms, setWatchRooms] = useState<WatchRoom[]>([]);
+  const [chatSection, setChatSection] = useState<"chat" | "watch">("chat");
+  const [activeWatchRoomId, setActiveWatchRoomId] = useState<string | null>(null);
   const [selectedRoomId, setSelectedRoomId] = useState("main");
   const selectedRoomIdRef = useRef("main");
   const [chatDraft, setChatDraft] = useState("");
   const [roomNameDraft, setRoomNameDraft] = useState("");
   const [roomMemberDraft, setRoomMemberDraft] = useState<string[]>([]);
   const [roomDialogOpen, setRoomDialogOpen] = useState(false);
+  const [watchDialogOpen, setWatchDialogOpen] = useState(false);
+  const [watchTitleDraft, setWatchTitleDraft] = useState("");
+  const [watchIsPrivate, setWatchIsPrivate] = useState(false);
+  const [watchPasswordDraft, setWatchPasswordDraft] = useState("");
+  const [passwordJoinRoom, setPasswordJoinRoom] = useState<WatchRoom | null>(null);
+  const [joinWatchPasswordDraft, setJoinWatchPasswordDraft] = useState("");
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [appInfo, setAppInfo] = useState<AppInfo | null>(null);
   const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
@@ -204,6 +297,19 @@ function MainWindow() {
         setChatMessages((current) => current.filter((message) => message.room_id !== event.payload));
         setSelectedRoomId("main");
       }),
+      listen<WatchRoom>("watch-room-updated", (event) => {
+        setWatchRooms((current) => upsertWatchRoom(current, event.payload));
+      }),
+      listen<WatchRoomEndMessage>("watch-room-ended", (event) => {
+        setWatchRooms((current) => current.filter((room) => room.room_id !== event.payload.room_id));
+        setActiveWatchRoomId((current) => (current === event.payload.room_id ? null : current));
+        showToast("Watch room ended.");
+      }),
+      listen<WatchJoinResult>("watch-room-join-result", (event) => {
+        if (!event.payload.accepted) {
+          setError(event.payload.reason ?? "Failed to join watch room.");
+        }
+      }),
       getCurrentWebview().onDragDropEvent((event) => {
         const payload = event.payload;
         if (payload.type !== "drop" || payload.paths.length === 0) return;
@@ -240,6 +346,7 @@ function MainWindow() {
     setAppInfo(info);
     await refreshShares();
     await refreshChat("main");
+    await refreshWatchRooms();
   }
 
   async function refreshShares() {
@@ -259,6 +366,16 @@ function MainWindow() {
   async function refreshChatRooms() {
     setChatRooms(await listChatRooms());
   }
+
+  async function refreshWatchRooms() {
+    setWatchRooms(await listWatchRooms());
+  }
+
+  useEffect(() => {
+    if (!activeWatchRoomId) return;
+    if (tab === "chat" && chatSection === "watch") return;
+    void hideWatchContentWebview(activeWatchRoomId);
+  }, [activeWatchRoomId, chatSection, tab]);
 
   function upsertTransfer(next: TransferInfo) {
     setTransfers((current) => {
@@ -489,9 +606,13 @@ function MainWindow() {
       )}
 
       {tab === "chat" && (
-        <ChatTab
+        <ChatWorkspace
+          section={chatSection}
+          onSectionChange={setChatSection}
           rooms={chatRooms}
           messages={chatMessages}
+          watchRooms={watchRooms}
+          activeWatchRoomId={activeWatchRoomId}
           selectedRoom={selectedRoom}
           devices={devices}
           draft={chatDraft}
@@ -522,6 +643,27 @@ function MainWindow() {
               upsertChatMessage(payload.message);
             })
           }
+          onOpenWatchCreate={() => {
+            setWatchTitleDraft("");
+            setWatchIsPrivate(false);
+            setWatchPasswordDraft("");
+            setWatchDialogOpen(true);
+          }}
+          onJoinWatch={(room) => {
+            if (room.status === "ended") return;
+            if (room.is_private) {
+              setPasswordJoinRoom(room);
+              setJoinWatchPasswordDraft("");
+              return;
+            }
+            void runAction(async () => {
+              const session = await joinWatchRoom(room.room_id);
+              setActiveWatchRoomId(session.room.room_id);
+              setChatSection("watch");
+              await refreshWatchRooms();
+            }, "Watch room opened.");
+          }}
+          onOpenActiveWatchRoom={setActiveWatchRoomId}
         />
       )}
 
@@ -731,6 +873,109 @@ function MainWindow() {
                 }
               >
                 <Plus size={16} /> 创建
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {watchDialogOpen && (
+        <div className="modal-backdrop">
+          <div className="modal">
+            <h2>Create Watch Room</h2>
+            <input
+              value={watchTitleDraft}
+              onChange={(event) => setWatchTitleDraft(event.target.value)}
+              placeholder="Room title"
+              autoFocus
+              maxLength={48}
+            />
+            <label className="toggle-row">
+              <input type="checkbox" checked={watchIsPrivate} onChange={(event) => setWatchIsPrivate(event.target.checked)} />
+              Password protected room
+            </label>
+            {watchIsPrivate ? (
+              <input
+                type="password"
+                value={watchPasswordDraft}
+                onChange={(event) => setWatchPasswordDraft(event.target.value)}
+                placeholder="Room password"
+                maxLength={64}
+              />
+            ) : null}
+            <div className="modal-actions">
+              <button
+                onClick={() => {
+                  setWatchDialogOpen(false);
+                  setWatchTitleDraft("");
+                  setWatchPasswordDraft("");
+                  setWatchIsPrivate(false);
+                }}
+              >
+                Cancel
+              </button>
+              <button
+                className="primary"
+                disabled={busy}
+                onClick={() =>
+                  void runAction(async () => {
+                    const input: CreateWatchRoomInput = {
+                      title: watchTitleDraft.trim(),
+                      is_private: watchIsPrivate,
+                      password: watchIsPrivate ? watchPasswordDraft : null,
+                    };
+                    const session = await createWatchRoom(input);
+                    setWatchDialogOpen(false);
+                    setWatchTitleDraft("");
+                    setWatchPasswordDraft("");
+                    setWatchIsPrivate(false);
+                    setActiveWatchRoomId(session.room.room_id);
+                    setChatSection("watch");
+                    await refreshWatchRooms();
+                  }, "Watch room created.")
+                }
+              >
+                <Plus size={16} /> Create
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {passwordJoinRoom && (
+        <div className="modal-backdrop">
+          <div className="modal">
+            <h2>Join Password Room</h2>
+            <p className="muted">{passwordJoinRoom.title}</p>
+            <input
+              type="password"
+              value={joinWatchPasswordDraft}
+              onChange={(event) => setJoinWatchPasswordDraft(event.target.value)}
+              placeholder="Enter room password"
+              autoFocus
+            />
+            <div className="modal-actions">
+              <button
+                onClick={() => {
+                  setPasswordJoinRoom(null);
+                  setJoinWatchPasswordDraft("");
+                }}
+              >
+                Cancel
+              </button>
+              <button
+                className="primary"
+                disabled={busy || !joinWatchPasswordDraft.trim()}
+                onClick={() =>
+                  void runAction(async () => {
+                    const session = await joinWatchRoom(passwordJoinRoom.room_id, joinWatchPasswordDraft);
+                    setPasswordJoinRoom(null);
+                    setJoinWatchPasswordDraft("");
+                    setActiveWatchRoomId(session.room.room_id);
+                    setChatSection("watch");
+                    await refreshWatchRooms();
+                  }, "Watch room opened.")
+                }
+              >
+                Join
               </button>
             </div>
           </div>
@@ -1107,6 +1352,408 @@ function ChatTab(props: {
   );
 }
 
+function ChatWorkspace(props: {
+  section: "chat" | "watch";
+  onSectionChange: (section: "chat" | "watch") => void;
+  rooms: ChatRoom[];
+  messages: ChatMessage[];
+  watchRooms: WatchRoom[];
+  activeWatchRoomId: string | null;
+  selectedRoom?: ChatRoom;
+  devices: DeviceInfo[];
+  draft: string;
+  busy: boolean;
+  onDraft: (value: string) => void;
+  onSelectRoom: (roomId: string) => void;
+  onOpenCreate: () => void;
+  onDeleteRoom: (roomId: string) => void;
+  onSend: () => void;
+  onOpenWatchCreate: () => void;
+  onJoinWatch: (room: WatchRoom) => void;
+  onOpenActiveWatchRoom: (roomId: string | null) => void;
+}) {
+  return (
+    <section className="stack">
+      <div className="subtabs">
+        <button className={`subtab ${props.section === "chat" ? "active" : ""}`} onClick={() => props.onSectionChange("chat")}>
+          Chat
+        </button>
+        <button className={`subtab ${props.section === "watch" ? "active" : ""}`} onClick={() => props.onSectionChange("watch")}>
+          Watch
+        </button>
+      </div>
+      {props.section === "chat" ? (
+        <ChatTab
+          rooms={props.rooms}
+          messages={props.messages}
+          selectedRoom={props.selectedRoom}
+          devices={props.devices}
+          draft={props.draft}
+          busy={props.busy}
+          onDraft={props.onDraft}
+          onSelectRoom={props.onSelectRoom}
+          onOpenCreate={props.onOpenCreate}
+          onDeleteRoom={props.onDeleteRoom}
+          onSend={props.onSend}
+        />
+      ) : props.activeWatchRoomId ? (
+        <WatchRoomWindowPage roomId={props.activeWatchRoomId} embedded devices={props.devices} onExit={() => props.onOpenActiveWatchRoom(null)} />
+      ) : (
+        <section className="panel stack">
+          <div className="panel-title">
+            <div>
+              <h2>Watch Rooms</h2>
+              <p className="muted">Create a room first, then the host can update the video link inside the room.</p>
+            </div>
+            <button className="primary" disabled={props.busy} onClick={props.onOpenWatchCreate}>
+              <Plus size={16} /> Create Room
+            </button>
+          </div>
+          <div className="watch-room-list">
+            {props.watchRooms.length === 0 ? (
+              <Empty icon={<MessageCircle size={34} />} text="No watch rooms yet" />
+            ) : (
+              props.watchRooms.map((room) => (
+                <article className={`watch-room-card ${room.status === "ended" ? "ended" : ""}`} key={room.room_id}>
+                  <div className="watch-room-main">
+                    <strong>{room.title}</strong>
+                    <span>Host: {watchUserName(room.host_user_id, room.host_name, props.devices)}</span>
+                    <span>Members: {room.member_count}</span>
+                    <span>Link: {room.url ? simplifyWatchUrl(room.url) : "No video link yet"}</span>
+                    <span>{room.is_private ? "Password room" : "Public room"}</span>
+                  </div>
+                  <button className="primary compact" disabled={props.busy || room.status === "ended"} onClick={() => props.onJoinWatch(room)}>
+                    Join
+                  </button>
+                </article>
+              ))
+            )}
+          </div>
+        </section>
+      )}
+    </section>
+  );
+}
+
+function WatchRoomWindowPage({
+  roomId,
+  embedded = false,
+  devices = [],
+  onExit,
+}: {
+  roomId: string;
+  embedded?: boolean;
+  devices?: DeviceInfo[];
+  onExit?: () => void;
+}) {
+  const [session, setSession] = useState<WatchRoomSession | null>(null);
+  const [messages, setMessages] = useState<WatchRoomChatMessage[]>([]);
+  const [chatDraft, setChatDraft] = useState("");
+  const [urlDraft, setUrlDraft] = useState("");
+  const [videoStatus, setVideoStatus] = useState<WatchRoomVideoStatus>({
+    room_id: roomId,
+    phase: "idle",
+    message: "Loading room...",
+  });
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [childError, setChildError] = useState<string | null>(null);
+  const [roomEnded, setRoomEnded] = useState(false);
+  const [knownDevices, setKnownDevices] = useState<DeviceInfo[]>(devices);
+  const hostRef = useRef<HTMLDivElement | null>(null);
+  const currentUrlRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (devices.length > 0) {
+      setKnownDevices(devices);
+      return;
+    }
+    let mounted = true;
+    void listDevices().then((items) => {
+      if (mounted) setKnownDevices(items);
+    });
+    return () => {
+      mounted = false;
+    };
+  }, [devices]);
+
+  useEffect(() => {
+    let mounted = true;
+    const load = async () => {
+      try {
+        const [nextSession, nextMessages] = await Promise.all([
+          getWatchRoomSession(roomId),
+          listWatchRoomMessages(roomId).catch(() => []),
+        ]);
+        if (!mounted) return;
+        setSession(nextSession);
+        setMessages(nextMessages);
+        setUrlDraft(nextSession?.room.url ?? "");
+        if (!nextSession) {
+          setError("Room session was not found.");
+        }
+      } catch (err) {
+        if (!mounted) return;
+        setError(err instanceof Error ? err.message : String(err));
+      }
+    };
+    void load();
+    return () => {
+      mounted = false;
+    };
+  }, [roomId]);
+
+  useEffect(() => {
+    const tasks = [
+      listen<WatchRoom>("watch-room-updated", (event) => {
+        if (event.payload.room_id !== roomId) return;
+        setSession((current) => (current ? { ...current, room: event.payload } : current));
+        setUrlDraft((current) => current || event.payload.url || "");
+      }),
+      listen<WatchRoomChatMessage>("watch-room-chat-message", (event) => {
+        if (event.payload.room_id !== roomId) return;
+        setMessages((current) =>
+          current.some((item) => item.message_id === event.payload.message_id)
+            ? current
+            : [...current, event.payload].slice(-200),
+        );
+      }),
+      listen<WatchRoomEndMessage>("watch-room-ended", (event) => {
+        if (event.payload.room_id !== roomId) return;
+        setRoomEnded(true);
+        void closeWatchContentWebview(roomId);
+        if (embedded) {
+          onExit?.();
+        } else {
+          void getCurrentWindow().close();
+        }
+      }),
+      listen<WatchRoomVideoStatus>("watch-room-video-status", (event) => {
+        if (event.payload.room_id !== roomId) return;
+        setVideoStatus(event.payload);
+      }),
+    ];
+    return () => {
+      void Promise.all(tasks).then((items) => items.forEach((unlisten) => unlisten()));
+    };
+  }, [embedded, onExit, roomId]);
+
+  useEffect(() => {
+    const room = session?.room;
+    if (!room?.url) {
+      currentUrlRef.current = null;
+      void hideWatchContentWebview(roomId);
+      return;
+    }
+    const host = hostRef.current;
+    if (!host) return;
+
+    const syncBounds = async () => {
+      const rect = host.getBoundingClientRect();
+      const bounds: WatchContentBounds =
+        rect.width < 40 || rect.height < 40
+          ? { x: -10000, y: -10000, width: 1, height: 1 }
+          : { x: rect.left, y: rect.top, width: rect.width, height: rect.height };
+      await moveWatchContentWebview(roomId, bounds);
+    };
+
+    const openOrMove = async () => {
+      const rect = host.getBoundingClientRect();
+      const bounds: WatchContentBounds = { x: rect.left, y: rect.top, width: rect.width, height: rect.height };
+      try {
+        setChildError(null);
+        if (currentUrlRef.current !== room.url) {
+          if (currentUrlRef.current) {
+            await closeWatchContentWebview(roomId);
+          }
+          currentUrlRef.current = room.url;
+          await openWatchContentWebview(getCurrentWindow().label || "main", roomId, room.url, bounds);
+        } else {
+          await syncBounds();
+        }
+      } catch (err) {
+        setChildError(err instanceof Error ? err.message : String(err));
+      }
+    };
+
+    void openOrMove();
+    const observer = new ResizeObserver(() => void syncBounds());
+    observer.observe(host);
+    const onScroll = () => void syncBounds();
+    window.addEventListener("scroll", onScroll, true);
+    window.addEventListener("resize", onScroll);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("scroll", onScroll, true);
+      window.removeEventListener("resize", onScroll);
+    };
+  }, [roomId, session?.room.url]);
+
+  useEffect(() => {
+    return () => {
+      void hideWatchContentWebview(roomId);
+    };
+  }, [roomId]);
+
+  const room = session?.room;
+  const isHost = session?.is_host ?? false;
+  const displayDevices = devices.length > 0 ? devices : knownDevices;
+
+  async function runAction(action: () => Promise<void>) {
+    try {
+      setBusy(true);
+      setError(null);
+      await action();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <main className={`watch-room-shell ${embedded ? "embedded" : ""}`}>
+      <section className="watch-room-window">
+        <header className="watch-room-window-header">
+          <div className="watch-room-heading">
+            <p className="eyebrow">QuickLAN Watch</p>
+            <h1>{room?.title ?? "Watch Room"}</h1>
+            <div className="watch-room-meta">
+              <span>Host: {room ? watchUserName(room.host_user_id, room.host_name, displayDevices) : "-"}</span>
+              <span>Members: {room?.member_count ?? "-"}</span>
+              <span>{room?.is_private ? "Password room" : "Public room"}</span>
+              <span>{room?.has_video_url ? "Video link set" : "No video link"}</span>
+            </div>
+          </div>
+          <div className="watch-room-status">
+            {embedded && room && !roomEnded ? (
+              <button className="secondary compact" disabled={busy} onClick={() => void openWatchRoomWindow(roomId)}>
+                <ExternalLink size={15} /> Open Window
+              </button>
+            ) : null}
+            {room && !roomEnded ? (
+              <button
+                className="secondary compact"
+                disabled={busy}
+                onClick={() =>
+                  void runAction(async () => {
+                    await closeWatchContentWebview(roomId);
+                    if (isHost) await endWatchRoom(roomId);
+                    else await leaveWatchRoom(roomId);
+                    onExit?.();
+                  })
+                }
+              >
+                <X size={15} /> {isHost ? "End Room" : "Leave Room"}
+              </button>
+            ) : null}
+            <span className={`pill watch-phase ${videoStatus.phase}`}>{videoStatus.message}</span>
+          </div>
+        </header>
+
+        {error ? <div className="error"><span>{error}</span></div> : null}
+
+        <div className="watch-room-grid">
+          <section className="watch-stage panel">
+            <div className="watch-stage-toolbar">
+              <div>
+                <h2>Video Area</h2>
+                <p className="muted">{room?.url ? `Current page: ${simplifyWatchUrl(room.url)}` : "The host has not set a video link yet."}</p>
+              </div>
+              {isHost ? (
+                <div className="watch-url-form">
+                  <input value={urlDraft} onChange={(event) => setUrlDraft(event.target.value)} placeholder="Paste an http/https video page link" disabled={busy || roomEnded} />
+                  <button
+                    className="primary compact"
+                    disabled={busy || !urlDraft.trim() || roomEnded}
+                    onClick={() =>
+                      void runAction(async () => {
+                        const next = await updateWatchRoomUrl(roomId, urlDraft);
+                        setSession(next);
+                      })
+                    }
+                  >
+                    <Save size={15} /> Update Link
+                  </button>
+                </div>
+              ) : null}
+            </div>
+            {!room?.url ? (
+              <div className="watch-stage-empty">
+                <MessageCircle size={36} />
+                <p>No video link yet</p>
+                <span>You can stay in the room chat and wait for the host to update the link.</span>
+              </div>
+            ) : null}
+            <div ref={hostRef} className={`watch-stage-viewport ${room?.url ? "active" : ""}`} />
+            {childError ? <div className="watch-stage-warning">WebView init failed: {childError}</div> : null}
+          </section>
+
+          <aside className="watch-chat panel">
+            <div className="panel-title">
+              <div>
+                <h2>Room Chat</h2>
+                <p className="muted">Only visible inside this watch room.</p>
+              </div>
+            </div>
+            <div className="watch-chat-messages">
+              {messages.length === 0 ? (
+                <Empty icon={<MessageCircle size={32} />} text="No room messages yet" />
+              ) : (
+                messages.map((message) => (
+                  <article className={`watch-chat-message ${message.system ? "system" : ""}`} key={message.message_id}>
+                    <div className="watch-chat-head">
+                      <strong>{watchMessageSenderName(message, displayDevices)}</strong>
+                      <span>{formatDateTime(message.created_at)}</span>
+                    </div>
+                    <p>{message.body}</p>
+                  </article>
+                ))
+              )}
+            </div>
+            <div className="chat-input">
+              <textarea
+                value={chatDraft}
+                onChange={(event) => setChatDraft(event.target.value)}
+                rows={2}
+                disabled={busy || roomEnded}
+                placeholder="Send a room message"
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" && !event.shiftKey) {
+                    event.preventDefault();
+                    void runAction(async () => {
+                      const body = chatDraft.trim();
+                      if (!body) return;
+                      const message = await sendWatchRoomMessage(roomId, body);
+                      setMessages((current) => [...current, message].slice(-200));
+                      setChatDraft("");
+                    });
+                  }
+                }}
+              />
+              <button
+                className="primary"
+                disabled={busy || !chatDraft.trim() || roomEnded}
+                onClick={() =>
+                  void runAction(async () => {
+                    const body = chatDraft.trim();
+                    if (!body) return;
+                    const message = await sendWatchRoomMessage(roomId, body);
+                    setMessages((current) => [...current, message].slice(-200));
+                    setChatDraft("");
+                  })
+                }
+              >
+                <Send size={16} /> Send
+              </button>
+            </div>
+          </aside>
+        </div>
+      </section>
+    </main>
+  );
+}
+
 function SettingsTab(props: {
   settings: AppSettings;
   appInfo: AppInfo | null;
@@ -1465,6 +2112,17 @@ function messageSenderName(message: ChatMessage, devices: DeviceInfo[]) {
   return `${device.note}（${message.sender_name}）`;
 }
 
+function watchUserName(userId: string, fallback: string, devices: DeviceInfo[] = []) {
+  const device = devices.find((item) => item.id === userId);
+  if (!device?.note) return fallback;
+  return `${device.note} (${fallback})`;
+}
+
+function watchMessageSenderName(message: WatchRoomChatMessage, devices: DeviceInfo[] = []) {
+  if (message.system) return message.sender_name;
+  return watchUserName(message.sender_user_id, message.sender_name, devices);
+}
+
 function useDefaultAvatar(event: React.SyntheticEvent<HTMLImageElement>) {
   if (event.currentTarget.src !== defaultAvatarUrl) {
     event.currentTarget.src = defaultAvatarUrl;
@@ -1478,8 +2136,40 @@ function upsertRoom(rooms: ChatRoom[], room: ChatRoom) {
   );
 }
 
+function upsertWatchRoom(rooms: WatchRoom[], room: WatchRoom) {
+  const rest = rooms.filter((item) => item.room_id !== room.room_id);
+  return [room, ...rest].sort((a, b) => b.created_at - a.created_at);
+}
+
+async function closeWatchContentWebview(roomId: string) {
+  await closeWatchContentWebviewCommand(roomId);
+}
+
+async function hideWatchContentWebview(roomId: string) {
+  await hideWatchContentWebviewCommand(roomId);
+}
+
+function safeCurrentWindowLabel() {
+  try {
+    return getCurrentWindow().label || "main";
+  } catch (error) {
+    console.error("[watch-room] failed to get current window label", error);
+    return "main";
+  }
+}
+
 function basename(path: string) {
   return path.split(/[\\/]/).pop() ?? path;
+}
+
+function simplifyWatchUrl(value: string | null) {
+  if (!value) return "No video link";
+  try {
+    const url = new URL(value);
+    return url.hostname.replace(/^www\./, "") || value;
+  } catch {
+    return value;
+  }
 }
 
 function formatDateTime(seconds: number) {
