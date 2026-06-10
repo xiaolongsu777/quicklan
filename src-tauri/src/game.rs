@@ -204,28 +204,36 @@ impl GameService {
         let room_name = clean_room_name(&request.room_name)?;
         let visibility = request.visibility;
         let password_hash = normalized_password_hash(&visibility, request.password_hash)?;
-        let room = GameRoomSummary {
-            room_id: room_id.clone(),
-            game_type: GameType::Gomoku,
-            room_name,
-            host_peer_id: self.local_device_id.clone(),
-            host_name,
-            guest_peer_id: None,
-            guest_name: None,
-            visibility,
-            password_hash,
-            status: GameRoomStatus::Waiting,
-            created_at: now,
-            updated_at: now,
-        };
-        let snapshot = GameRoomSnapshot {
-            room: room.clone(),
-            gomoku_state: new_gomoku_state(&room),
-            version: 1,
-            last_event_id: Uuid::new_v4().to_string(),
-        };
+        let snapshot;
         {
             let mut state = self.lock()?;
+            if state
+                .rooms
+                .iter()
+                .any(|item| item.room.room_name == room_name)
+            {
+                return Err("已存在同名小游戏房间".to_string());
+            }
+            let room = GameRoomSummary {
+                room_id: room_id.clone(),
+                game_type: GameType::Gomoku,
+                room_name,
+                host_peer_id: self.local_device_id.clone(),
+                host_name,
+                guest_peer_id: None,
+                guest_name: None,
+                visibility,
+                password_hash,
+                status: GameRoomStatus::Waiting,
+                created_at: now,
+                updated_at: now,
+            };
+            snapshot = GameRoomSnapshot {
+                room: room.clone(),
+                gomoku_state: new_gomoku_state(&room),
+                version: 1,
+                last_event_id: Uuid::new_v4().to_string(),
+            };
             upsert_snapshot(&mut state.rooms, snapshot.clone());
         }
         self.save()?;
@@ -282,11 +290,9 @@ impl GameService {
         }
         snapshot.room.guest_peer_id = Some(request.user_id.clone());
         snapshot.room.guest_name = Some(clean_nickname(&request.nickname));
-        snapshot.room.status = GameRoomStatus::Playing;
         snapshot.room.updated_at = now_secs();
         snapshot.gomoku_state.white_peer_id = Some(request.user_id);
-        snapshot.gomoku_state.current_turn = 1;
-        snapshot.gomoku_state.status_text = "黑方回合".to_string();
+        sync_room_status_for_guest(&mut snapshot);
         touch_snapshot(&mut snapshot);
         {
             let mut state = self.lock()?;
@@ -643,15 +649,60 @@ fn new_gomoku_state(room: &GameRoomSummary) -> GomokuState {
     }
 }
 
+fn active_turn_status_text(current_turn: u8) -> String {
+    if current_turn == 1 {
+        "黑方回合".to_string()
+    } else {
+        "白方回合".to_string()
+    }
+}
+
+fn winner_status_text(winner: u8, ended_reason: Option<&str>) -> String {
+    match (winner, ended_reason) {
+        (1, Some("surrender")) => "黑方获胜（对手认输）".to_string(),
+        (2, Some("surrender")) => "白方获胜（对手认输）".to_string(),
+        (1, _) => "黑方获胜".to_string(),
+        _ => "白方获胜".to_string(),
+    }
+}
+
+fn waiting_status_text(snapshot: &GameRoomSnapshot) -> String {
+    if snapshot.gomoku_state.move_history.is_empty() {
+        "等待玩家加入".to_string()
+    } else {
+        "等待玩家重新加入".to_string()
+    }
+}
+
+fn sync_room_status_for_guest(snapshot: &mut GameRoomSnapshot) {
+    if snapshot.room.guest_peer_id.is_none() {
+        snapshot.room.status = GameRoomStatus::Waiting;
+        snapshot.gomoku_state.status_text = waiting_status_text(snapshot);
+        return;
+    }
+
+    if let Some(winner) = snapshot.gomoku_state.winner {
+        snapshot.room.status = GameRoomStatus::Finished;
+        snapshot.gomoku_state.status_text =
+            winner_status_text(winner, snapshot.gomoku_state.ended_reason.as_deref());
+        return;
+    }
+
+    snapshot.room.status = GameRoomStatus::Playing;
+    snapshot.gomoku_state.status_text = if snapshot.gomoku_state.restart_requested_by.is_some() {
+        "等待对方确认重新开始".to_string()
+    } else {
+        active_turn_status_text(snapshot.gomoku_state.current_turn)
+    };
+}
+
 fn reset_guest(snapshot: &mut GameRoomSnapshot) {
     snapshot.room.guest_peer_id = None;
     snapshot.room.guest_name = None;
-    snapshot.room.status = GameRoomStatus::Waiting;
     snapshot.room.updated_at = now_secs();
-    let black_peer_id = snapshot.gomoku_state.black_peer_id.clone();
-    snapshot.gomoku_state = new_gomoku_state(&snapshot.room);
-    snapshot.gomoku_state.black_peer_id = black_peer_id;
     snapshot.gomoku_state.white_peer_id = None;
+    snapshot.gomoku_state.restart_requested_by = None;
+    sync_room_status_for_guest(snapshot);
     touch_snapshot(snapshot);
 }
 

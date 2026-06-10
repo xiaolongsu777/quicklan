@@ -49,4 +49,4 @@ src-tauri/target/release/bundle/nsis/
 
 ## Version
 
-Current version: `0.1.2`
+Current version: `0.1.4`

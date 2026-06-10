@@ -76,8 +76,16 @@ export function createGameRoom(
   });
 }
 
-export function joinGameRoom(roomId: string, passwordHash?: string | null): Promise<GameJoinResponse> {
-  return invoke<GameJoinResponse>("join_game_room", { roomId, passwordHash: passwordHash ?? null });
+export function joinGameRoom(
+  roomId: string,
+  passwordHash?: string | null,
+  hostPeerId?: string | null,
+): Promise<GameJoinResponse> {
+  return invoke<GameJoinResponse>("join_game_room", {
+    roomId,
+    passwordHash: passwordHash ?? null,
+    hostPeerId: hostPeerId ?? null,
+  });
 }
 
 export function leaveGameRoom(roomId: string): Promise<void> {

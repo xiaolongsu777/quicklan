@@ -158,12 +158,15 @@ pub fn join_game_room(
     state: State<'_, AppState>,
     room_id: String,
     password_hash: Option<String>,
+    host_peer_id: Option<String>,
 ) -> Result<GameJoinResponse, String> {
-    let room = state
-        .game
-        .find_room(&room_id)
-        .ok_or_else(|| "小游戏房间不存在".to_string())?;
-    let response = if room.host_peer_id == state.library.device_id() {
+    let room = state.game.find_room(&room_id);
+    let resolved_host_peer_id = room
+        .as_ref()
+        .map(|summary| summary.host_peer_id.clone())
+        .or(host_peer_id)
+        .ok_or_else(|| "????????".to_string())?;
+    let response = if resolved_host_peer_id == state.library.device_id() {
         state.game.join_room_request(GameJoinRequest {
             room_id,
             user_id: state.library.device_id(),
@@ -173,13 +176,13 @@ pub fn join_game_room(
     } else {
         let host = state
             .discovery
-            .find_device(&room.host_peer_id)
-            .ok_or_else(|| "房主当前不在线".to_string())?;
+            .find_device(&resolved_host_peer_id)
+            .ok_or_else(|| "???????".to_string())?;
         post_lan_json_response(
             &host,
             "/games/rooms/join",
             &GameJoinRequest {
-                room_id: room.room_id.clone(),
+                room_id,
                 user_id: state.library.device_id(),
                 nickname: state.settings.nickname(),
                 password_hash,

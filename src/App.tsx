@@ -216,6 +216,25 @@ function MainWindow() {
     : null;
   const onlineCount = devices.filter((device) => device.online).length;
 
+  function findMemberGameRoomId(rooms: GameRoomSummary[], preferredRoomId?: string | null) {
+    if (!appInfo?.device_id) return null;
+    if (
+      preferredRoomId &&
+      rooms.some(
+        (room) =>
+          room.room_id === preferredRoomId &&
+          (room.host_peer_id === appInfo.device_id || room.guest_peer_id === appInfo.device_id),
+      )
+    ) {
+      return preferredRoomId;
+    }
+    return (
+      rooms.find(
+        (room) => room.host_peer_id === appInfo.device_id || room.guest_peer_id === appInfo.device_id,
+      )?.room_id ?? null
+    );
+  }
+
   useEffect(() => {
     selectedRoomIdRef.current = selectedRoomId;
   }, [selectedRoomId]);
@@ -400,7 +419,11 @@ function MainWindow() {
   async function refreshGame(roomId = selectedGameRoomIdRef.current) {
     const rooms = await listGameRooms("gomoku");
     setGameRooms(rooms);
-    const nextRoomId = roomId && rooms.some((room) => room.room_id === roomId) ? roomId : null;
+    const preferredRoomId =
+      roomId && rooms.some((room) => room.room_id === roomId)
+        ? roomId
+        : findMemberGameRoomId(rooms, selectedGameRoomIdRef.current);
+    const nextRoomId = preferredRoomId && rooms.some((room) => room.room_id === preferredRoomId) ? preferredRoomId : null;
     setSelectedGameRoomId(nextRoomId);
     if (nextRoomId) {
       try {
@@ -511,6 +534,13 @@ function MainWindow() {
       .then(setGameSnapshot)
       .catch((err) => setError(err instanceof Error ? err.message : String(err)));
   }, [selectedGameRoom?.room_id, exitedGameRoomIds]);
+
+  useEffect(() => {
+    if (tab !== "chat" || chatSection !== "game" || selectedGameRoomId) return;
+    const memberRoomId = findMemberGameRoomId(gameRooms);
+    if (!memberRoomId) return;
+    setSelectedGameRoomId(memberRoomId);
+  }, [tab, chatSection, selectedGameRoomId, gameRooms, appInfo?.device_id]);
 
   useEffect(() => {
     if (!selectedWatchRoom?.room_id || !watchActivation?.is_member) {
@@ -914,20 +944,17 @@ function MainWindow() {
               onRoomAction={(room) =>
                 void runAction(async () => {
                   if (appInfo?.device_id && room.host_peer_id === appInfo.device_id) return;
-                  const exitedLocally = exitedGameRoomIds.includes(room.room_id);
                   if (
                     appInfo?.device_id &&
-                    (room.host_peer_id === appInfo.device_id || room.guest_peer_id === appInfo.device_id) &&
-                    !exitedLocally
+                    (room.host_peer_id === appInfo.device_id || room.guest_peer_id === appInfo.device_id)
                   ) {
+                    await leaveGameRoom(room.room_id);
                     if (selectedGameRoomIdRef.current === room.room_id) {
                       setSelectedGameRoomId(null);
                       setGameActivation(null);
                       setGameSnapshot(null);
                     }
-                    setExitedGameRoomIds((current) =>
-                      current.includes(room.room_id) ? current : [...current, room.room_id],
-                    );
+                    setExitedGameRoomIds((current) => current.filter((roomId) => roomId !== room.room_id));
                     await refreshGame(selectedGameRoomIdRef.current === room.room_id ? null : selectedGameRoomIdRef.current);
                     return;
                   }
@@ -937,7 +964,7 @@ function MainWindow() {
                     setGameJoinPasswordOpen(true);
                     return;
                   }
-                  const joined = await joinGameRoom(room.room_id, null);
+                  const joined = await joinGameRoom(room.room_id, null, room.host_peer_id);
                   if (!joined.accepted || !joined.snapshot) {
                     throw new Error(joined.reason ?? "Join game room failed");
                   }
@@ -950,14 +977,13 @@ function MainWindow() {
               onLeaveRoom={() =>
                 void runAction(async () => {
                   if (!selectedGameRoom) return;
-                  setExitedGameRoomIds((current) =>
-                    current.includes(selectedGameRoom.room_id) ? current : [...current, selectedGameRoom.room_id],
-                  );
+                  await leaveGameRoom(selectedGameRoom.room_id);
+                  setExitedGameRoomIds((current) => current.filter((roomId) => roomId !== selectedGameRoom.room_id));
                   setSelectedGameRoomId(null);
                   setGameActivation(null);
                   setGameSnapshot(null);
                   await refreshGame(null);
-                }, "已退出当前棋盘视图")
+                }, "已退出当前房间")
               }
               onCloseRoom={() =>
                 void runAction(async () => {
@@ -1292,9 +1318,10 @@ function MainWindow() {
                     const joined: GameJoinResponse = await joinGameRoom(
                       pendingJoinGameRoom.room_id,
                       await sha256Text(gameJoinPassword),
+                      pendingJoinGameRoom.host_peer_id,
                     );
                     if (!joined.accepted || !joined.snapshot) {
-                      throw new Error(joined.reason ?? "加入小游戏房间失败");
+                      throw new Error(joined.reason ?? "?????????");
                     }
                     setGameJoinPasswordOpen(false);
                     setPendingJoinGameRoom(null);
@@ -1303,7 +1330,7 @@ function MainWindow() {
                     setSelectedGameRoomId(joined.snapshot.room.room_id);
                     setGameSnapshot(joined.snapshot);
                     await refreshGame(joined.snapshot.room.room_id);
-                  }, "已加入五子棋房间")
+                  }, "????????")
                 }
               >
                 加入
@@ -2181,7 +2208,7 @@ function GameTab(props: {
                   <div className="row-actions game-topbar-right">
                     {isMember && !isHost && (
                       <button className="secondary compact" disabled={props.busy} onClick={props.onLeaveRoom}>
-                        退出视图
+                        退出
                       </button>
                     )}
                     {isHost && (
@@ -2385,7 +2412,7 @@ function GameTabFixed(props: {
                   <div className="row-actions game-topbar-right">
                     {isMember && !isHost ? (
                       <button className="secondary compact" disabled={props.busy} onClick={props.onLeaveRoom}>
-                        退出视图
+                        退出
                       </button>
                     ) : null}
                     {isHost ? (

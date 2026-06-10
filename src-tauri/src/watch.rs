@@ -170,21 +170,30 @@ impl WatchService {
         password_hash: Option<String>,
     ) -> Result<WatchRoom, String> {
         let now = now_secs();
-        let room = WatchRoom {
-            room_id: Uuid::new_v4().to_string(),
-            host_device_id: self.local_device_id.clone(),
-            host_name,
-            title: clean_room_title(&title)?,
-            is_private,
-            password_hash: normalized_password_hash(is_private, password_hash)?,
-            current_url: None,
-            member_ids: vec![self.local_device_id.clone()],
-            status: "active".to_string(),
-            created_at: now,
-            updated_at: now,
-        };
+        let clean_title = clean_room_title(&title)?;
+        let room;
         {
             let mut state = self.lock()?;
+            if state
+                .rooms
+                .iter()
+                .any(|item| item.status == "active" && item.title == clean_title)
+            {
+                return Err("已存在同名观影房间".to_string());
+            }
+            room = WatchRoom {
+                room_id: Uuid::new_v4().to_string(),
+                host_device_id: self.local_device_id.clone(),
+                host_name,
+                title: clean_title,
+                is_private,
+                password_hash: normalized_password_hash(is_private, password_hash)?,
+                current_url: None,
+                member_ids: vec![self.local_device_id.clone()],
+                status: "active".to_string(),
+                created_at: now,
+                updated_at: now,
+            };
             upsert_room(&mut state.rooms, room.clone());
         }
         self.save()?;

@@ -115,21 +115,30 @@ impl ChatService {
         member_ids: Vec<String>,
         owner_device_id: String,
     ) -> Result<ChatRoom, String> {
+        let clean_name = clean_room_name(&name)?;
         let mut members = unique_ids(member_ids);
         if !members.iter().any(|id| id == &owner_device_id) {
             members.push(owner_device_id.clone());
         }
-        let room = ChatRoom {
-            room_id: Uuid::new_v4().to_string(),
-            name: clean_room_name(&name)?,
-            owner_device_id,
-            member_ids: members,
-            is_main: false,
-            created_at: now_secs(),
-            deleted: false,
-        };
+        let room;
         {
             let mut state = self.lock()?;
+            if state
+                .rooms
+                .iter()
+                .any(|room| !room.deleted && room.name == clean_name)
+            {
+                return Err("已存在同名聊天室".to_string());
+            }
+            room = ChatRoom {
+                room_id: Uuid::new_v4().to_string(),
+                name: clean_name,
+                owner_device_id,
+                member_ids: members,
+                is_main: false,
+                created_at: now_secs(),
+                deleted: false,
+            };
             state.rooms.push(room.clone());
         }
         self.save()?;
