@@ -29,6 +29,8 @@ import {
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   acceptTransfer,
+  acceptGomokuRestart,
+  activateGameRoom,
   applyWatchSync,
   addSharePaths,
   checkForUpdate,
@@ -37,6 +39,7 @@ import {
   chooseFolderPath,
   chooseSharePaths,
   createChatRoom,
+  createGameRoom,
   createWatchRoom,
   deleteChatRoom,
   discoverIp,
@@ -44,6 +47,7 @@ import {
   endWatchRoom,
   getAppInfo,
   getControlApiInfo,
+  getGameRoomState,
   getLibrarySettings,
   getNetworkStatus,
   getSettings,
@@ -53,6 +57,7 @@ import {
   listChatMessages,
   listChatRooms,
   listDevices,
+  listGameRooms,
   listMyShares,
   listWatchChatMessages,
   listWatchRooms,
@@ -67,11 +72,17 @@ import {
   hideWatchWebview,
   joinWatchRoom,
   leaveWatchRoom,
+  leaveGameRoom,
+  joinGameRoom,
+  closeGameRoom,
+  requestGomokuMove,
+  requestGomokuRestart,
   sendChatMessage,
   sendFiles,
   sendWatchChatMessage,
   setWatchWebviewBounds,
   submitWatchRoomUrl,
+  surrenderGomoku,
   updateDeviceNote,
   updateLibrarySettings,
   updateNickname,
@@ -85,6 +96,10 @@ import type {
   ChatRoom,
   ControlApiInfo,
   DeviceInfo,
+  GameActivation,
+  GameJoinResponse,
+  GameRoomSnapshot,
+  GameRoomSummary,
   IncomingTransferPayload,
   LibrarySettings,
   NetworkStatus,
@@ -103,7 +118,7 @@ import defaultAvatarUrl from "./assets/normal.jpg";
 import "./styles.css";
 
 type Tab = "devices" | "store" | "mine" | "chat" | "settings";
-type ChatSection = "chat" | "watch";
+type ChatSection = "chat" | "watch" | "game";
 
 function unwrapTransfer(payload: TransferPayload): TransferInfo {
   if ("transfer" in payload) return payload.transfer;
@@ -134,6 +149,19 @@ function MainWindow() {
   const [chatDraft, setChatDraft] = useState("");
   const [chatSection, setChatSection] = useState<ChatSection>("chat");
   const [watchRooms, setWatchRooms] = useState<WatchRoom[]>([]);
+  const [gameRooms, setGameRooms] = useState<GameRoomSummary[]>([]);
+  const [selectedGameRoomId, setSelectedGameRoomId] = useState<string | null>(null);
+  const selectedGameRoomIdRef = useRef<string | null>(null);
+  const [gameActivation, setGameActivation] = useState<GameActivation | null>(null);
+  const [gameSnapshot, setGameSnapshot] = useState<GameRoomSnapshot | null>(null);
+  const [exitedGameRoomIds, setExitedGameRoomIds] = useState<string[]>([]);
+  const [gameCreateOpen, setGameCreateOpen] = useState(false);
+  const [gameJoinPasswordOpen, setGameJoinPasswordOpen] = useState(false);
+  const [gameRoomNameDraft, setGameRoomNameDraft] = useState("");
+  const [gamePrivateDraft, setGamePrivateDraft] = useState(false);
+  const [gamePasswordDraft, setGamePasswordDraft] = useState("");
+  const [gameJoinPassword, setGameJoinPassword] = useState("");
+  const [pendingJoinGameRoom, setPendingJoinGameRoom] = useState<GameRoomSummary | null>(null);
   const [watchMessages, setWatchMessages] = useState<WatchChatMessage[]>([]);
   const [selectedWatchRoomId, setSelectedWatchRoomId] = useState<string | null>(null);
   const selectedWatchRoomIdRef = useRef<string | null>(null);
@@ -180,6 +208,9 @@ function MainWindow() {
 
   const selectedDevice = devices.find((device) => device.id === selectedDeviceId);
   const selectedRoom = chatRooms.find((room) => room.room_id === selectedRoomId) ?? chatRooms[0];
+  const selectedGameRoom = selectedGameRoomId
+    ? gameRooms.find((room) => room.room_id === selectedGameRoomId) ?? null
+    : null;
   const selectedWatchRoom = selectedWatchRoomId
     ? watchRooms.find((room) => room.room_id === selectedWatchRoomId) ?? null
     : null;
@@ -192,6 +223,10 @@ function MainWindow() {
   useEffect(() => {
     selectedWatchRoomIdRef.current = selectedWatchRoomId;
   }, [selectedWatchRoomId]);
+
+  useEffect(() => {
+    selectedGameRoomIdRef.current = selectedGameRoomId;
+  }, [selectedGameRoomId]);
 
   const filteredShares = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -257,6 +292,27 @@ function MainWindow() {
           setWatchUrlDraft(event.payload.current_url ?? "");
         }
       }),
+      listen<GameRoomSnapshot>("game-room-updated", (event) => {
+        setGameRooms((current) => upsertGameRoom(current, event.payload.room));
+        if (selectedGameRoomIdRef.current === event.payload.room.room_id) {
+          setGameSnapshot(event.payload);
+        }
+      }),
+      listen<GameRoomSnapshot>("game-state-updated", (event) => {
+        if (selectedGameRoomIdRef.current === event.payload.room.room_id) {
+          setGameSnapshot(event.payload);
+        }
+        setGameRooms((current) => upsertGameRoom(current, event.payload.room));
+      }),
+      listen<string>("game-room-deleted", (event) => {
+        setGameRooms((current) => current.filter((room) => room.room_id !== event.payload));
+        setExitedGameRoomIds((current) => current.filter((roomId) => roomId !== event.payload));
+        if (selectedGameRoomIdRef.current === event.payload) {
+          setSelectedGameRoomId(null);
+          setGameActivation(null);
+          setGameSnapshot(null);
+        }
+      }),
       listen<string>("watch-room-deleted", (event) => {
         setWatchRooms((current) => current.filter((room) => room.room_id !== event.payload));
         setWatchMessages((current) => current.filter((message) => message.room_id !== event.payload));
@@ -308,6 +364,7 @@ function MainWindow() {
     await refreshShares();
     await refreshChat("main");
     await refreshWatch();
+    await refreshGame();
   }
 
   async function refreshShares() {
@@ -337,6 +394,22 @@ function MainWindow() {
       setWatchMessages(await listWatchChatMessages(nextRoomId));
     } else {
       setWatchMessages([]);
+    }
+  }
+
+  async function refreshGame(roomId = selectedGameRoomIdRef.current) {
+    const rooms = await listGameRooms("gomoku");
+    setGameRooms(rooms);
+    const nextRoomId = roomId && rooms.some((room) => room.room_id === roomId) ? roomId : null;
+    setSelectedGameRoomId(nextRoomId);
+    if (nextRoomId) {
+      try {
+        setGameSnapshot(await getGameRoomState(nextRoomId));
+      } catch {
+        setGameSnapshot(null);
+      }
+    } else {
+      setGameSnapshot(null);
     }
   }
 
@@ -419,6 +492,25 @@ function MainWindow() {
       })
       .catch((err) => setError(err instanceof Error ? err.message : String(err)));
   }, [selectedWatchRoom?.room_id, selectedWatchRoom?.current_url]);
+
+  useEffect(() => {
+    if (!selectedGameRoom) {
+      setGameActivation(null);
+      setGameSnapshot(null);
+      return;
+    }
+    if (exitedGameRoomIds.includes(selectedGameRoom.room_id)) {
+      setGameActivation(null);
+      setGameSnapshot(null);
+      return;
+    }
+    void activateGameRoom(selectedGameRoom.room_id)
+      .then(setGameActivation)
+      .catch((err) => setError(err instanceof Error ? err.message : String(err)));
+    void getGameRoomState(selectedGameRoom.room_id)
+      .then(setGameSnapshot)
+      .catch((err) => setError(err instanceof Error ? err.message : String(err)));
+  }, [selectedGameRoom?.room_id, exitedGameRoomIds]);
 
   useEffect(() => {
     if (!selectedWatchRoom?.room_id || !watchActivation?.is_member) {
@@ -799,6 +891,114 @@ function MainWindow() {
               }
             />
           }
+          gameContent={
+            <GameTabFixed
+              localDeviceId={appInfo?.device_id ?? null}
+              rooms={gameRooms}
+              selectedRoom={selectedGameRoom}
+              activation={gameActivation}
+              snapshot={gameSnapshot}
+              exitedRoomIds={exitedGameRoomIds}
+              busy={busy}
+              onSelectRoom={(roomId) =>
+                void runAction(async () => {
+                  setSelectedGameRoomId(roomId);
+                })
+              }
+              onOpenCreate={() => {
+                setGameRoomNameDraft("");
+                setGamePrivateDraft(false);
+                setGamePasswordDraft("");
+                setGameCreateOpen(true);
+              }}
+              onRoomAction={(room) =>
+                void runAction(async () => {
+                  if (appInfo?.device_id && room.host_peer_id === appInfo.device_id) return;
+                  const exitedLocally = exitedGameRoomIds.includes(room.room_id);
+                  if (
+                    appInfo?.device_id &&
+                    (room.host_peer_id === appInfo.device_id || room.guest_peer_id === appInfo.device_id) &&
+                    !exitedLocally
+                  ) {
+                    if (selectedGameRoomIdRef.current === room.room_id) {
+                      setSelectedGameRoomId(null);
+                      setGameActivation(null);
+                      setGameSnapshot(null);
+                    }
+                    setExitedGameRoomIds((current) =>
+                      current.includes(room.room_id) ? current : [...current, room.room_id],
+                    );
+                    await refreshGame(selectedGameRoomIdRef.current === room.room_id ? null : selectedGameRoomIdRef.current);
+                    return;
+                  }
+                  if (room.visibility === "password") {
+                    setPendingJoinGameRoom(room);
+                    setGameJoinPassword("");
+                    setGameJoinPasswordOpen(true);
+                    return;
+                  }
+                  const joined = await joinGameRoom(room.room_id, null);
+                  if (!joined.accepted || !joined.snapshot) {
+                    throw new Error(joined.reason ?? "Join game room failed");
+                  }
+                  setExitedGameRoomIds((current) => current.filter((roomId) => roomId !== room.room_id));
+                  setSelectedGameRoomId(joined.snapshot.room.room_id);
+                  setGameSnapshot(joined.snapshot);
+                  await refreshGame(joined.snapshot.room.room_id);
+                })
+              }
+              onLeaveRoom={() =>
+                void runAction(async () => {
+                  if (!selectedGameRoom) return;
+                  setExitedGameRoomIds((current) =>
+                    current.includes(selectedGameRoom.room_id) ? current : [...current, selectedGameRoom.room_id],
+                  );
+                  setSelectedGameRoomId(null);
+                  setGameActivation(null);
+                  setGameSnapshot(null);
+                  await refreshGame(null);
+                }, "已退出当前棋盘视图")
+              }
+              onCloseRoom={() =>
+                void runAction(async () => {
+                  if (!selectedGameRoom) return;
+                  await closeGameRoom(selectedGameRoom.room_id);
+                  setSelectedGameRoomId(null);
+                  setGameActivation(null);
+                  setGameSnapshot(null);
+                  await refreshGame(null);
+                }, "Game room closed")
+              }
+              onMove={(x, y) =>
+                void runAction(async () => {
+                  if (!selectedGameRoom) throw new Error("Please select a game room first");
+                  const snapshot = await requestGomokuMove(selectedGameRoom.room_id, x, y);
+                  setGameSnapshot(snapshot);
+                })
+              }
+              onRestart={() =>
+                void runAction(async () => {
+                  if (!selectedGameRoom) throw new Error("Please select a game room first");
+                  const snapshot = await requestGomokuRestart(selectedGameRoom.room_id);
+                  setGameSnapshot(snapshot);
+                })
+              }
+              onAcceptRestart={() =>
+                void runAction(async () => {
+                  if (!selectedGameRoom) throw new Error("Please select a game room first");
+                  const snapshot = await acceptGomokuRestart(selectedGameRoom.room_id);
+                  setGameSnapshot(snapshot);
+                })
+              }
+              onSurrender={() =>
+                void runAction(async () => {
+                  if (!selectedGameRoom) throw new Error("Please select a game room first");
+                  const snapshot = await surrenderGomoku(selectedGameRoom.room_id);
+                  setGameSnapshot(snapshot);
+                })
+              }
+            />
+          }
         />
       )}
 
@@ -1055,6 +1255,121 @@ function MainWindow() {
                     setSelectedWatchRoomId(room.room_id);
                     await refreshWatch(room.room_id);
                   }, "观影房间已创建")
+                }
+              >
+                <Plus size={16} /> 创建
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {gameJoinPasswordOpen && pendingJoinGameRoom && (
+        <div className="modal-backdrop">
+          <div className="modal">
+            <h2>加入密码五子棋房间</h2>
+            <p className="muted">{pendingJoinGameRoom.room_name}</p>
+            <input
+              type="password"
+              value={gameJoinPassword}
+              onChange={(event) => setGameJoinPassword(event.target.value)}
+              placeholder="输入房间密码"
+              autoFocus
+            />
+            <div className="modal-actions">
+              <button
+                onClick={() => {
+                  setGameJoinPasswordOpen(false);
+                  setPendingJoinGameRoom(null);
+                  setGameJoinPassword("");
+                }}
+              >
+                取消
+              </button>
+              <button
+                className="primary"
+                onClick={() =>
+                  void runAction(async () => {
+                    const joined: GameJoinResponse = await joinGameRoom(
+                      pendingJoinGameRoom.room_id,
+                      await sha256Text(gameJoinPassword),
+                    );
+                    if (!joined.accepted || !joined.snapshot) {
+                      throw new Error(joined.reason ?? "加入小游戏房间失败");
+                    }
+                    setGameJoinPasswordOpen(false);
+                    setPendingJoinGameRoom(null);
+                    setGameJoinPassword("");
+                    setChatSection("game");
+                    setSelectedGameRoomId(joined.snapshot.room.room_id);
+                    setGameSnapshot(joined.snapshot);
+                    await refreshGame(joined.snapshot.room.room_id);
+                  }, "已加入五子棋房间")
+                }
+              >
+                加入
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {gameCreateOpen && (
+        <div className="modal-backdrop">
+          <div className="modal">
+            <h2>创建五子棋房间</h2>
+            <input
+              value={gameRoomNameDraft}
+              onChange={(event) => setGameRoomNameDraft(event.target.value)}
+              placeholder="房间名称（可选）"
+              autoFocus
+              maxLength={48}
+            />
+            <label>
+              <span>访问方式</span>
+              <select
+                value={gamePrivateDraft ? "password" : "public"}
+                onChange={(event) => setGamePrivateDraft(event.target.value === "password")}
+              >
+                <option value="public">公开房间</option>
+                <option value="password">密码房间</option>
+              </select>
+            </label>
+            {gamePrivateDraft && (
+              <input
+                type="password"
+                value={gamePasswordDraft}
+                onChange={(event) => setGamePasswordDraft(event.target.value)}
+                placeholder="房间密码"
+              />
+            )}
+            <div className="modal-actions">
+              <button
+                onClick={() => {
+                  setGameCreateOpen(false);
+                  setGameRoomNameDraft("");
+                  setGamePrivateDraft(false);
+                  setGamePasswordDraft("");
+                }}
+              >
+                取消
+              </button>
+              <button
+                className="primary"
+                onClick={() =>
+                  void runAction(async () => {
+                    const snapshot = await createGameRoom(
+                      gameRoomNameDraft,
+                      gamePrivateDraft ? "password" : "public",
+                      gamePrivateDraft ? await sha256Text(gamePasswordDraft) : null,
+                    );
+                    setGameCreateOpen(false);
+                    setGameRoomNameDraft("");
+                    setGamePrivateDraft(false);
+                    setGamePasswordDraft("");
+                    setChatSection("game");
+                    setSelectedGameRoomId(snapshot.room.room_id);
+                    setGameSnapshot(snapshot);
+                    await refreshGame(snapshot.room.room_id);
+                  }, "五子棋房间已创建")
                 }
               >
                 <Plus size={16} /> 创建
@@ -1510,6 +1825,7 @@ function ChatPage(props: {
   onSectionChange: (value: ChatSection) => void;
   chatContent: React.ReactNode;
   watchContent: React.ReactNode;
+  gameContent: React.ReactNode;
 }) {
   return (
     <section className="stack">
@@ -1526,8 +1842,16 @@ function ChatPage(props: {
         >
           观影
         </button>
+        <button
+          className={`tab ${props.section === "game" ? "active" : ""}`}
+          onClick={() => props.onSectionChange("game")}
+        >
+          小游戏
+        </button>
       </div>
-      {props.section === "chat" ? props.chatContent : props.watchContent}
+      <div className={props.section === "chat" ? "" : "section-hidden"}>{props.chatContent}</div>
+      <div className={props.section === "watch" ? "" : "section-hidden"}>{props.watchContent}</div>
+      <div className={props.section === "game" ? "" : "section-hidden"}>{props.gameContent}</div>
     </section>
   );
 }
@@ -1702,6 +2026,404 @@ function WatchTab(props: {
             <Send size={16} /> 发送
           </button>
         </div>
+      </section>
+    </section>
+  );
+}
+
+function GameTab(props: {
+  localDeviceId: string | null;
+  rooms: GameRoomSummary[];
+  selectedRoom: GameRoomSummary | null;
+  activation: GameActivation | null;
+  snapshot: GameRoomSnapshot | null;
+  busy: boolean;
+  onSelectRoom: (roomId: string) => void;
+  onOpenCreate: () => void;
+  onRoomAction: (room: GameRoomSummary) => void;
+  onLeaveRoom: () => void;
+  onCloseRoom: () => void;
+  onMove: (x: number, y: number) => void;
+  onRestart: () => void;
+  onAcceptRestart: () => void;
+  onSurrender: () => void;
+}) {
+  const isHost = props.activation?.is_host ?? false;
+  const isMember = props.activation?.is_member ?? false;
+  const winner = props.snapshot?.gomoku_state.winner ?? null;
+  const myColor = props.localDeviceId
+    ? props.snapshot?.gomoku_state.black_peer_id === props.localDeviceId
+      ? 1
+      : props.snapshot?.gomoku_state.white_peer_id === props.localDeviceId
+        ? 2
+        : null
+    : null;
+  const isMyTurn = !!myColor && props.snapshot?.gomoku_state.current_turn === myColor && !props.snapshot.gomoku_state.winner;
+  const restartRequestedByOpponent =
+    !!props.snapshot?.gomoku_state.restart_requested_by &&
+    props.snapshot.gomoku_state.restart_requested_by !== props.localDeviceId;
+
+  return (
+    <section className="game-layout">
+      <section className="panel stack game-sidebar">
+        <div className="panel-title">
+          <h2>五子棋房间</h2>
+          <button className="secondary compact" onClick={props.onOpenCreate}>
+            <Plus size={15} /> 创建
+          </button>
+        </div>
+        <div className="watch-room-list">
+          {props.rooms.length === 0 ? (
+            <Empty icon={<Library size={28} />} text="还没有可加入的五子棋房间" />
+          ) : (
+            props.rooms.map((room) => {
+              const selected = props.selectedRoom?.room_id === room.room_id;
+              const isHostRoom = !!props.localDeviceId && room.host_peer_id === props.localDeviceId;
+              const isJoined =
+                !!props.localDeviceId &&
+                (room.host_peer_id === props.localDeviceId || room.guest_peer_id === props.localDeviceId);
+              const actionLabel = isHostRoom ? "房主" : isJoined ? "离开" : "进入";
+              return (
+                <article
+                  className={`watch-room-card ${selected ? "active" : ""}`}
+                  key={room.room_id}
+                  onClick={() => props.onSelectRoom(room.room_id)}
+                >
+                  <div className="watch-room-card-head">
+                    <strong>{room.room_name}</strong>
+                    <span className="pill">{room.visibility === "password" ? "密码" : "公开"}</span>
+                  </div>
+                  <p className="muted">房主：{room.host_name} · {room.guest_peer_id ? "2/2" : "1/2"}</p>
+                  <p className="muted">状态：{gameRoomStatusLabel(room.status)}</p>
+                  <button
+                    className="primary compact"
+                    disabled={props.busy || isHostRoom}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      props.onRoomAction(room);
+                    }}
+                  >
+                    {actionLabel}
+                  </button>
+                </article>
+              );
+            })
+          )}
+        </div>
+      </section>
+
+      <section className="panel stack game-main">
+        {props.selectedRoom ? (
+          <>
+            <div className="panel-title">
+              <div>
+                <h2>{props.selectedRoom.room_name}</h2>
+                <p className="muted">
+                  房主：{props.selectedRoom.host_name} · {props.selectedRoom.visibility === "password" ? "密码房" : "公开房"}
+                </p>
+              </div>
+              <div className="row-actions">
+                {isMember && !isHost && (
+                  <button className="secondary compact" disabled={props.busy} onClick={props.onLeaveRoom}>
+                    离开房间
+                  </button>
+                )}
+                {isHost && (
+                  <button className="icon-button danger" title="解散房间" onClick={props.onCloseRoom}>
+                    <Trash2 size={15} />
+                  </button>
+                )}
+              </div>
+            </div>
+            {!isMember || !props.snapshot ? (
+              <div className="game-placeholder">
+                <strong>进入房间后开始对局</strong>
+                <p className="muted">未加入房间前不会加载棋盘。</p>
+              </div>
+            ) : (
+              <>
+                <div className="game-meta">
+                  <span className="pill">你执{myColor === 1 ? "黑棋" : myColor === 2 ? "白棋" : "未加入"}</span>
+                  <span className={`pill turn-pill ${isMyTurn ? "active" : ""}`}>
+                    {isMyTurn ? "轮到你了" : props.snapshot.gomoku_state.status_text}
+                  </span>
+                  {props.snapshot.gomoku_state.last_move && (
+                    <span className="pill">
+                      最后一步：{props.snapshot.gomoku_state.last_move.x + 1},{props.snapshot.gomoku_state.last_move.y + 1}
+                    </span>
+                  )}
+                </div>
+                {winner && (
+                  <div className="game-result-banner">
+                    {winner === 1 ? "黑棋获胜" : "白棋获胜"}
+                    {myColor && winner === myColor ? "，你赢了" : myColor ? "，你输了" : ""}
+                  </div>
+                )}
+                <div className="game-topbar">
+                  <div className="row-actions game-topbar-left">
+                    {restartRequestedByOpponent ? (
+                      <button className="primary compact" disabled={props.busy} onClick={props.onAcceptRestart}>
+                        <Check size={15} /> 鍚屾剰閲嶅紑
+                      </button>
+                    ) : (
+                      <button className="secondary compact" disabled={props.busy || !isMember} onClick={props.onRestart}>
+                        <RefreshCw size={15} /> 閲嶆柊寮€濮?
+                      </button>
+                    )}
+                    <button
+                      className="secondary compact"
+                      disabled={props.busy || !isMember || !!winner}
+                      onClick={props.onSurrender}
+                    >
+                      璁よ緭
+                    </button>
+                  </div>
+                  <div className="row-actions game-topbar-right">
+                    {isMember && !isHost && (
+                      <button className="secondary compact" disabled={props.busy} onClick={props.onLeaveRoom}>
+                        退出视图
+                      </button>
+                    )}
+                    {isHost && (
+                      <button className="icon-button danger" title="瑙ｆ暎鎴块棿" onClick={props.onCloseRoom}>
+                        <Trash2 size={15} />
+                      </button>
+                    )}
+                  </div>
+                </div>
+                <div className="gomoku-board" role="grid" aria-label="Gomoku Board">
+                  {props.snapshot.gomoku_state.board.map((row, y) =>
+                    row.map((cell, x) => {
+                      const isLastMove =
+                        props.snapshot?.gomoku_state.last_move?.x === x &&
+                        props.snapshot?.gomoku_state.last_move?.y === y;
+                      return (
+                        <button
+                          key={`${x}-${y}`}
+                          className={`gomoku-cell ${isLastMove ? "last" : ""} ${cell !== 0 ? "occupied" : ""}`}
+                          disabled={props.busy || !isMyTurn || cell !== 0}
+                          onClick={() => props.onMove(x, y)}
+                        >
+                          {cell === 1 ? <span className="gomoku-stone black" /> : null}
+                          {cell === 2 ? <span className="gomoku-stone white" /> : null}
+                        </button>
+                      );
+                    }),
+                  )}
+                </div>
+                <div className="row-actions game-actions">
+                  <button
+                    className="secondary compact"
+                    disabled={props.busy || !isMember || !!props.snapshot.gomoku_state.winner}
+                    onClick={props.onSurrender}
+                  >
+                    认输
+                  </button>
+                  {restartRequestedByOpponent ? (
+                    <button className="primary compact" disabled={props.busy} onClick={props.onAcceptRestart}>
+                      <Check size={15} /> 同意重开
+                    </button>
+                  ) : (
+                    <button className="secondary compact" disabled={props.busy || !isMember} onClick={props.onRestart}>
+                      <RefreshCw size={15} /> 重新开始
+                    </button>
+                  )}
+                </div>
+              </>
+            )}
+          </>
+        ) : (
+          <div className="game-placeholder">
+            <strong>选择一个五子棋房间开始</strong>
+            <p className="muted">小游戏页面会在后台保持状态，切换页面不会重置棋盘。</p>
+          </div>
+        )}
+      </section>
+    </section>
+  );
+}
+
+function GameTabFixed(props: {
+  localDeviceId: string | null;
+  rooms: GameRoomSummary[];
+  selectedRoom: GameRoomSummary | null;
+  activation: GameActivation | null;
+  snapshot: GameRoomSnapshot | null;
+  exitedRoomIds: string[];
+  busy: boolean;
+  onSelectRoom: (roomId: string) => void;
+  onOpenCreate: () => void;
+  onRoomAction: (room: GameRoomSummary) => void;
+  onLeaveRoom: () => void;
+  onCloseRoom: () => void;
+  onMove: (x: number, y: number) => void;
+  onRestart: () => void;
+  onAcceptRestart: () => void;
+  onSurrender: () => void;
+}) {
+  const isHost = props.activation?.is_host ?? false;
+  const isMember = props.activation?.is_member ?? false;
+  const winner = props.snapshot?.gomoku_state.winner ?? null;
+  const myColor = props.localDeviceId
+    ? props.snapshot?.gomoku_state.black_peer_id === props.localDeviceId
+      ? 1
+      : props.snapshot?.gomoku_state.white_peer_id === props.localDeviceId
+        ? 2
+        : null
+    : null;
+  const isMyTurn =
+    !!myColor && props.snapshot?.gomoku_state.current_turn === myColor && !props.snapshot.gomoku_state.winner;
+  const restartRequestedByOpponent =
+    !!props.snapshot?.gomoku_state.restart_requested_by &&
+    props.snapshot.gomoku_state.restart_requested_by !== props.localDeviceId;
+
+  return (
+    <section className="game-layout">
+      <section className="panel stack game-sidebar">
+        <div className="panel-title">
+          <h2>五子棋房间</h2>
+          <button className="secondary compact" onClick={props.onOpenCreate}>
+            <Plus size={15} /> 创建
+          </button>
+        </div>
+        <div className="watch-room-list">
+          {props.rooms.length === 0 ? (
+            <Empty icon={<Library size={28} />} text="还没有可加入的五子棋房间" />
+          ) : (
+            props.rooms.map((room) => {
+              const selected = props.selectedRoom?.room_id === room.room_id;
+              const isHostRoom = !!props.localDeviceId && room.host_peer_id === props.localDeviceId;
+              const exitedLocally = props.exitedRoomIds.includes(room.room_id);
+              const isJoined =
+                !!props.localDeviceId &&
+                (room.host_peer_id === props.localDeviceId || room.guest_peer_id === props.localDeviceId) &&
+                !exitedLocally;
+              const actionLabel = isHostRoom ? "房主" : isJoined ? "退出" : "进入";
+              return (
+                <article
+                  className={`watch-room-card ${selected ? "active" : ""}`}
+                  key={room.room_id}
+                  onClick={() => props.onSelectRoom(room.room_id)}
+                >
+                  <div className="watch-room-card-head">
+                    <strong>{room.room_name}</strong>
+                    <span className="pill">{room.visibility === "password" ? "密码" : "公开"}</span>
+                  </div>
+                  <p className="muted">房主：{room.host_name} · {room.guest_peer_id ? "2/2" : "1/2"}</p>
+                  <p className="muted">状态：{gameRoomStatusLabel(room.status)}</p>
+                  <button
+                    className="primary compact"
+                    disabled={props.busy || isHostRoom}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      props.onRoomAction(room);
+                    }}
+                  >
+                    {actionLabel}
+                  </button>
+                </article>
+              );
+            })
+          )}
+        </div>
+      </section>
+
+      <section className="panel stack game-main">
+        {props.selectedRoom ? (
+          <>
+            <div className="panel-title">
+              <div>
+                <h2>{props.selectedRoom.room_name}</h2>
+                <p className="muted">
+                  房主：{props.selectedRoom.host_name} · {props.selectedRoom.visibility === "password" ? "密码房" : "公开房"}
+                </p>
+              </div>
+            </div>
+            {!isMember || !props.snapshot ? (
+              <div className="game-placeholder">
+                <strong>进入房间后开始对局</strong>
+                <p className="muted">未加入房间前不会加载棋盘。</p>
+              </div>
+            ) : (
+              <>
+                <div className="game-meta">
+                  <span className="pill">你执{myColor === 1 ? "黑棋" : myColor === 2 ? "白棋" : "未加入"}</span>
+                  <span className={`pill turn-pill ${isMyTurn ? "active" : ""}`}>
+                    {isMyTurn ? "轮到你了" : props.snapshot.gomoku_state.status_text}
+                  </span>
+                  {props.snapshot.gomoku_state.last_move ? (
+                    <span className="pill">
+                      最后一步：{props.snapshot.gomoku_state.last_move.x + 1},{props.snapshot.gomoku_state.last_move.y + 1}
+                    </span>
+                  ) : null}
+                </div>
+                {winner ? (
+                  <div className="game-result-banner">
+                    {winner === 1 ? "黑棋获胜" : "白棋获胜"}
+                    {myColor && winner === myColor ? "，你赢了" : myColor ? "，你输了" : ""}
+                  </div>
+                ) : null}
+                <div className="game-topbar">
+                  <div className="row-actions game-topbar-left">
+                    {restartRequestedByOpponent ? (
+                      <button className="primary compact" disabled={props.busy} onClick={props.onAcceptRestart}>
+                        <Check size={15} /> 同意重开
+                      </button>
+                    ) : (
+                      <button className="secondary compact" disabled={props.busy || !isMember} onClick={props.onRestart}>
+                        <RefreshCw size={15} /> 重新开始
+                      </button>
+                    )}
+                    <button
+                      className="secondary compact"
+                      disabled={props.busy || !isMember || !!winner}
+                      onClick={props.onSurrender}
+                    >
+                      认输
+                    </button>
+                  </div>
+                  <div className="row-actions game-topbar-right">
+                    {isMember && !isHost ? (
+                      <button className="secondary compact" disabled={props.busy} onClick={props.onLeaveRoom}>
+                        退出视图
+                      </button>
+                    ) : null}
+                    {isHost ? (
+                      <button className="icon-button danger" title="解散房间" onClick={props.onCloseRoom}>
+                        <Trash2 size={15} />
+                      </button>
+                    ) : null}
+                  </div>
+                </div>
+                <div className="gomoku-board" role="grid" aria-label="Gomoku Board">
+                  {props.snapshot.gomoku_state.board.map((row, y) =>
+                    row.map((cell, x) => {
+                      const isLastMove =
+                        props.snapshot?.gomoku_state.last_move?.x === x &&
+                        props.snapshot?.gomoku_state.last_move?.y === y;
+                      return (
+                        <button
+                          key={`${x}-${y}`}
+                          className={`gomoku-cell ${isLastMove ? "last" : ""}`}
+                          disabled={props.busy || !isMyTurn || cell !== 0}
+                          onClick={() => props.onMove(x, y)}
+                        >
+                          {cell === 1 ? <span className="gomoku-stone black" /> : null}
+                          {cell === 2 ? <span className="gomoku-stone white" /> : null}
+                        </button>
+                      );
+                    }),
+                  )}
+                </div>
+              </>
+            )}
+          </>
+        ) : (
+          <div className="game-placeholder">
+            <strong>选择一个五子棋房间开始</strong>
+            <p className="muted">小游戏页面会在后台保持状态，切换页面不会重置棋盘。</p>
+          </div>
+        )}
       </section>
     </section>
   );
@@ -2083,8 +2805,24 @@ function upsertWatchRoom(rooms: WatchRoom[], room: WatchRoom) {
   return [room, ...rest].sort((a, b) => b.created_at - a.created_at || a.title.localeCompare(b.title));
 }
 
+function upsertGameRoom(rooms: GameRoomSummary[], room: GameRoomSummary) {
+  const rest = rooms.filter((item) => item.room_id !== room.room_id);
+  return [room, ...rest].sort(
+    (a, b) => b.created_at - a.created_at || a.room_name.localeCompare(b.room_name),
+  );
+}
+
 function basename(path: string) {
   return path.split(/[\\/]/).pop() ?? path;
+}
+
+function gameRoomStatusLabel(status: GameRoomSummary["status"]) {
+  const labels: Record<GameRoomSummary["status"], string> = {
+    waiting: "等待中",
+    playing: "对局中",
+    finished: "已结束",
+  };
+  return labels[status];
 }
 
 function simplifyVideoUrl(url: string) {

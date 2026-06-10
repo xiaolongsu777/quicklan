@@ -97,7 +97,9 @@ impl WatchPlayerController {
         validate_watch_url(url)?;
         let webview = ensure_watch_webview(app)?;
         let parsed = Url::parse(url).map_err(|err| format!("视频链接无效: {err}"))?;
-        webview.navigate(parsed).map_err(|err| format!("加载视频页面失败: {err}"))?;
+        webview
+            .navigate(parsed)
+            .map_err(|err| format!("加载视频页面失败: {err}"))?;
         Ok(())
     }
 
@@ -134,16 +136,22 @@ impl WatchPlayerController {
             .set_bounds(rect)
             .map_err(|err| format!("更新播放器位置失败: {err}"))?;
         if bounds.visible {
-            webview.show().map_err(|err| format!("显示播放器失败: {err}"))?;
+            webview
+                .show()
+                .map_err(|err| format!("显示播放器失败: {err}"))?;
         } else {
-            webview.hide().map_err(|err| format!("隐藏播放器失败: {err}"))?;
+            webview
+                .hide()
+                .map_err(|err| format!("隐藏播放器失败: {err}"))?;
         }
         Ok(())
     }
 
     pub fn hide<R: Runtime>(&self, app: &tauri::AppHandle<R>) -> Result<(), String> {
         if let Some(webview) = app.get_webview(WATCH_WEBVIEW_LABEL) {
-            webview.hide().map_err(|err| format!("隐藏播放器失败: {err}"))?;
+            webview
+                .hide()
+                .map_err(|err| format!("隐藏播放器失败: {err}"))?;
         }
         Ok(())
     }
@@ -171,10 +179,7 @@ impl WatchPlayerController {
             .map_err(|err| format!("执行远端同步失败: {err}"))
     }
 
-    pub fn current_sync<R: Runtime>(
-        &self,
-        app: &tauri::AppHandle<R>,
-    ) -> Option<WatchSyncPayload> {
+    pub fn current_sync<R: Runtime>(&self, app: &tauri::AppHandle<R>) -> Option<WatchSyncPayload> {
         let session = self.lock().ok()?.clone();
         if !session.is_host {
             return None;
@@ -286,7 +291,10 @@ impl WatchPlayerController {
         Ok(())
     }
 
-    fn snapshot<R: Runtime>(&self, app: &tauri::AppHandle<R>) -> Result<Option<PlayerSnapshot>, String> {
+    fn snapshot<R: Runtime>(
+        &self,
+        app: &tauri::AppHandle<R>,
+    ) -> Result<Option<PlayerSnapshot>, String> {
         let Some(webview) = app.get_webview(WATCH_WEBVIEW_LABEL) else {
             return Ok(None);
         };
@@ -336,12 +344,16 @@ fn ensure_watch_webview<R: Runtime>(app: &tauri::AppHandle<R>) -> Result<Webview
     Ok(webview)
 }
 
-fn broadcast_sync<R: Runtime>(app: &tauri::AppHandle<R>, payload: &WatchSyncPayload) -> Result<(), String> {
+fn broadcast_sync<R: Runtime>(
+    app: &tauri::AppHandle<R>,
+    payload: &WatchSyncPayload,
+) -> Result<(), String> {
     let state = app.state::<AppState>();
     let Some(room) = state.watch.find_room(&payload.room_id) else {
         return Ok(());
     };
-    let body = serde_json::to_string(payload).map_err(|err| format!("序列化同步消息失败: {err}"))?;
+    let body =
+        serde_json::to_string(payload).map_err(|err| format!("序列化同步消息失败: {err}"))?;
     let local_id = state.library.device_id();
     for device in watch_member_devices(&state, &room.member_ids, &local_id) {
         post_lan_json(&device, "/watch/sync", &body);

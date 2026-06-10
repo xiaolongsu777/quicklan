@@ -2,6 +2,7 @@ mod chat;
 mod commands;
 mod control_api;
 mod discovery;
+mod game;
 mod lan_api;
 mod library;
 mod protocol;
@@ -13,20 +14,23 @@ mod watch_player;
 
 use chat::ChatService;
 use commands::{
-    accept_transfer, add_share_paths, check_for_update, choose_avatar, choose_download_dir,
-    broadcast_local_watch_rooms, broadcast_watch_room_end_for_state,
-    choose_folder_path, choose_share_paths, clear_finished_transfers, create_chat_room,
-    delete_chat_room, discover_ip, download_share, get_app_info, get_control_api_info,
-    get_library_settings, get_network_status, get_settings, get_transfer, get_transfers,
-    install_update, list_chat_messages, list_chat_rooms, list_devices, list_my_shares,
-    list_shared_resources, list_watch_chat_messages, list_watch_rooms, open_path_location,
-    reject_transfer, remove_share, remove_transfer_record, send_chat_message,
-    send_files, send_watch_chat_message, set_watch_webview_bounds, submit_watch_room_url,
+    accept_gomoku_restart, accept_transfer, activate_game_room, activate_watch_room,
+    add_share_paths, apply_watch_sync, broadcast_local_watch_rooms,
+    broadcast_watch_room_end_for_state, check_for_update, choose_avatar, choose_download_dir,
+    choose_folder_path, choose_share_paths, clear_finished_transfers, close_game_room,
+    close_watch_webview, create_chat_room, create_game_room, create_watch_room, delete_chat_room,
+    discover_ip, download_share, end_watch_room, get_app_info, get_control_api_info,
+    get_game_room_state, get_library_settings, get_network_status, get_settings, get_transfer,
+    get_transfers, hide_watch_webview, install_update, join_game_room, join_watch_room,
+    leave_game_room, leave_watch_room, list_chat_messages, list_chat_rooms, list_devices,
+    list_game_rooms, list_my_shares, list_shared_resources, list_watch_chat_messages,
+    list_watch_rooms, open_path_location, reject_transfer, remove_share, remove_transfer_record,
+    request_gomoku_move, request_gomoku_restart, send_chat_message, send_files,
+    send_watch_chat_message, set_watch_webview_bounds, submit_watch_room_url, surrender_gomoku,
     update_device_note, update_library_settings, update_nickname, update_share,
-    activate_watch_room, apply_watch_sync, close_watch_webview, create_watch_room, end_watch_room,
-    hide_watch_webview, join_watch_room, leave_watch_room,
 };
 use discovery::DiscoveryService;
+use game::GameService;
 use library::LibraryService;
 use protocol::LAN_API_PORT;
 use serde::Serialize;
@@ -40,7 +44,7 @@ use std::{
 use tauri::{
     menu::MenuBuilder,
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    Manager, WindowEvent,
+    Emitter, Manager, WindowEvent,
 };
 use transfer::TransferService;
 use watch::WatchService;
@@ -67,6 +71,7 @@ pub struct AppState {
     pub library: LibraryService,
     pub chat: ChatService,
     pub watch: WatchService,
+    pub game: GameService,
     pub watch_player: WatchPlayerController,
     pub control_api: ControlApiInfo,
 }
@@ -170,12 +175,14 @@ pub fn run() {
                 .map_err(|err| format!("failed to load library: {err}"))?;
             let chat = ChatService::load(library.device_id());
             let watch = WatchService::load(library.device_id());
+            let game = GameService::load(library.device_id());
             let api_port = lan_api::start(
                 app_handle.clone(),
                 library.clone(),
                 settings.clone(),
                 chat.clone(),
                 watch.clone(),
+                game.clone(),
                 LAN_API_PORT,
             );
             let transfer = TransferService::new(
@@ -209,6 +216,7 @@ pub fn run() {
                 library,
                 chat,
                 watch,
+                game,
                 watch_player: WatchPlayerController::new(),
                 control_api: control_api.clone(),
             };
@@ -232,6 +240,21 @@ pub fn run() {
                         }
                         broadcast_local_watch_rooms(&state);
                         previous_hosted_rooms = current_hosted_rooms;
+                        let online_ids = state
+                            .discovery
+                            .list_devices()
+                            .into_iter()
+                            .filter(|device| device.online)
+                            .map(|device| device.id)
+                            .collect::<HashSet<_>>();
+                        if let Ok(changed_rooms) = state.game.reconcile_hosted_rooms(&online_ids) {
+                            for snapshot in changed_rooms {
+                                let _ = app_for_watch_broadcast
+                                    .emit("game-room-updated", snapshot.clone());
+                                crate::commands::broadcast_game_room_for_state(&state, &snapshot);
+                            }
+                        }
+                        crate::commands::broadcast_local_game_rooms(&state);
                     }
                 }
             });
@@ -303,6 +326,17 @@ pub fn run() {
             create_chat_room,
             delete_chat_room,
             send_chat_message,
+            list_game_rooms,
+            get_game_room_state,
+            create_game_room,
+            join_game_room,
+            leave_game_room,
+            close_game_room,
+            activate_game_room,
+            request_gomoku_move,
+            request_gomoku_restart,
+            accept_gomoku_restart,
+            surrender_gomoku,
             list_watch_rooms,
             list_watch_chat_messages,
             create_watch_room,

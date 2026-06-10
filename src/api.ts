@@ -7,6 +7,10 @@ import type {
   ChatRoom,
   ControlApiInfo,
   DeviceInfo,
+  GameActivation,
+  GameJoinResponse,
+  GameRoomSnapshot,
+  GameRoomSummary,
   LibrarySettings,
   NetworkStatus,
   ShareItem,
@@ -50,6 +54,58 @@ export function sendChatMessage(roomId: string, body: string): Promise<ChatMessa
 
 export function listWatchRooms(): Promise<WatchRoom[]> {
   return invoke<WatchRoom[]>("list_watch_rooms");
+}
+
+export function listGameRooms(gameType?: string | null): Promise<GameRoomSummary[]> {
+  return invoke<GameRoomSummary[]>("list_game_rooms", { gameType: gameType ?? null });
+}
+
+export function getGameRoomState(roomId: string): Promise<GameRoomSnapshot> {
+  return invoke<GameRoomSnapshot>("get_game_room_state", { roomId });
+}
+
+export function createGameRoom(
+  roomName: string,
+  visibility: "public" | "password",
+  passwordHash?: string | null,
+): Promise<GameRoomSnapshot> {
+  return invoke<GameRoomSnapshot>("create_game_room", {
+    roomName,
+    visibility,
+    passwordHash: passwordHash ?? null,
+  });
+}
+
+export function joinGameRoom(roomId: string, passwordHash?: string | null): Promise<GameJoinResponse> {
+  return invoke<GameJoinResponse>("join_game_room", { roomId, passwordHash: passwordHash ?? null });
+}
+
+export function leaveGameRoom(roomId: string): Promise<void> {
+  return invoke<void>("leave_game_room", { roomId });
+}
+
+export function closeGameRoom(roomId: string): Promise<void> {
+  return invoke<void>("close_game_room", { roomId });
+}
+
+export function activateGameRoom(roomId: string): Promise<GameActivation> {
+  return invoke<GameActivation>("activate_game_room", { roomId });
+}
+
+export function requestGomokuMove(roomId: string, x: number, y: number): Promise<GameRoomSnapshot> {
+  return invoke<GameRoomSnapshot>("request_gomoku_move", { roomId, x, y });
+}
+
+export function requestGomokuRestart(roomId: string): Promise<GameRoomSnapshot> {
+  return invoke<GameRoomSnapshot>("request_gomoku_restart", { roomId });
+}
+
+export function acceptGomokuRestart(roomId: string): Promise<GameRoomSnapshot> {
+  return invoke<GameRoomSnapshot>("accept_gomoku_restart", { roomId });
+}
+
+export function surrenderGomoku(roomId: string): Promise<GameRoomSnapshot> {
+  return invoke<GameRoomSnapshot>("surrender_gomoku", { roomId });
 }
 
 export function listWatchChatMessages(roomId: string): Promise<WatchChatMessage[]> {

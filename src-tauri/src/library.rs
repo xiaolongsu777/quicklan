@@ -596,7 +596,15 @@ impl LibraryService {
         api_port: u16,
         device_name: &str,
     ) -> Result<(), String> {
-        self.upsert_known_device(device_id, device_name, ip, tcp_port, api_port, "observed", false)
+        self.upsert_known_device(
+            device_id,
+            device_name,
+            ip,
+            tcp_port,
+            api_port,
+            "observed",
+            false,
+        )
     }
 
     pub fn list_known_devices(&self) -> Result<Vec<KnownDeviceRecord>, String> {

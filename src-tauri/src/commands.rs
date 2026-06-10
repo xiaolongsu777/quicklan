@@ -1,10 +1,15 @@
 use crate::{
     chat::{ChatMessage, ChatMessagePayload, ChatRoom, MAIN_ROOM_ID},
+    game::{
+        CreateGameRoomRequest, GameActivation, GameJoinRequest, GameJoinResponse, GameRoomSnapshot,
+        GameRoomSummary, GameType,
+    },
     protocol::{DeviceInfo, LibrarySettings, NetworkStatus, ShareItem, TransferInfo},
     settings::AppSettings,
+    storage,
     watch::{WatchChatMessage, WatchJoinRequest, WatchJoinResponse, WatchRoom},
     watch_player::WatchBounds,
-    storage, AppInfo, AppState, ControlApiInfo,
+    AppInfo, AppState, ControlApiInfo,
 };
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -93,6 +98,278 @@ pub struct WatchActivation {
     pub room: WatchRoom,
     pub is_host: bool,
     pub is_member: bool,
+}
+
+#[tauri::command]
+pub fn list_game_rooms(
+    state: State<'_, AppState>,
+    game_type: Option<String>,
+) -> Result<Vec<GameRoomSummary>, String> {
+    let game_type = match game_type.as_deref() {
+        Some("gomoku") => Some(GameType::Gomoku),
+        Some(other) => return Err(format!("不支持的游戏类型: {other}")),
+        None => None,
+    };
+    Ok(state.game.list_rooms(game_type))
+}
+
+#[tauri::command]
+pub fn get_game_room_state(
+    state: State<'_, AppState>,
+    room_id: String,
+) -> Result<GameRoomSnapshot, String> {
+    state
+        .game
+        .find_snapshot(&room_id)
+        .ok_or_else(|| "小游戏房间不存在".to_string())
+}
+
+#[tauri::command]
+pub fn create_game_room(
+    state: State<'_, AppState>,
+    room_name: String,
+    visibility: String,
+    password_hash: Option<String>,
+) -> Result<GameRoomSnapshot, String> {
+    let visibility = match visibility.as_str() {
+        "public" => crate::game::GameRoomVisibility::Public,
+        "password" => crate::game::GameRoomVisibility::Password,
+        _ => return Err("无效的房间可见性".to_string()),
+    };
+    let normalized_room_name = if room_name.trim().is_empty() {
+        format!("{} 的五子棋房间", state.settings.nickname())
+    } else {
+        room_name
+    };
+    let snapshot = state.game.create_room(
+        CreateGameRoomRequest {
+            room_name: normalized_room_name,
+            visibility,
+            password_hash,
+        },
+        state.settings.nickname(),
+    )?;
+    broadcast_game_room(&state, &snapshot);
+    Ok(snapshot)
+}
+
+#[tauri::command]
+pub fn join_game_room(
+    state: State<'_, AppState>,
+    room_id: String,
+    password_hash: Option<String>,
+) -> Result<GameJoinResponse, String> {
+    let room = state
+        .game
+        .find_room(&room_id)
+        .ok_or_else(|| "小游戏房间不存在".to_string())?;
+    let response = if room.host_peer_id == state.library.device_id() {
+        state.game.join_room_request(GameJoinRequest {
+            room_id,
+            user_id: state.library.device_id(),
+            nickname: state.settings.nickname(),
+            password_hash,
+        })?
+    } else {
+        let host = state
+            .discovery
+            .find_device(&room.host_peer_id)
+            .ok_or_else(|| "房主当前不在线".to_string())?;
+        post_lan_json_response(
+            &host,
+            "/games/rooms/join",
+            &GameJoinRequest {
+                room_id: room.room_id.clone(),
+                user_id: state.library.device_id(),
+                nickname: state.settings.nickname(),
+                password_hash,
+            },
+        )?
+    };
+    if let Some(snapshot) = response.snapshot.clone() {
+        state.game.accept_room(snapshot)?;
+    }
+    Ok(response)
+}
+
+#[tauri::command]
+pub fn leave_game_room(state: State<'_, AppState>, room_id: String) -> Result<(), String> {
+    let local_id = state.library.device_id();
+    let Some(room) = state.game.find_room(&room_id) else {
+        return Ok(());
+    };
+    if room.host_peer_id == local_id {
+        state.game.close_room(&room_id, &local_id)?;
+        broadcast_game_room_end(&state, &room_id);
+    } else {
+        let host = state
+            .discovery
+            .find_device(&room.host_peer_id)
+            .ok_or_else(|| "房主当前不在线".to_string())?;
+        let response = post_lan_json_response::<serde_json::Value, _>(
+            &host,
+            "/games/rooms/leave",
+            &serde_json::json!({
+                "room_id": room_id,
+                "user_id": local_id,
+            }),
+        )?;
+        if let Ok(snapshot) = serde_json::from_value::<GameRoomSnapshot>(response.clone()) {
+            state.game.accept_room(snapshot)?;
+        } else {
+            let _ = state
+                .game
+                .leave_room(&room.room_id, &state.library.device_id())?;
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn close_game_room(state: State<'_, AppState>, room_id: String) -> Result<(), String> {
+    state
+        .game
+        .close_room(&room_id, &state.library.device_id())?;
+    broadcast_game_room_end(&state, &room_id);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn activate_game_room(
+    state: State<'_, AppState>,
+    room_id: String,
+) -> Result<GameActivation, String> {
+    state.game.activation(&room_id, &state.library.device_id())
+}
+
+#[tauri::command]
+pub fn request_gomoku_move(
+    state: State<'_, AppState>,
+    room_id: String,
+    x: usize,
+    y: usize,
+) -> Result<GameRoomSnapshot, String> {
+    let room = state
+        .game
+        .find_room(&room_id)
+        .ok_or_else(|| "小游戏房间不存在".to_string())?;
+    let snapshot = if room.host_peer_id == state.library.device_id() {
+        state
+            .game
+            .request_move(&room_id, &state.library.device_id(), x, y)?
+    } else {
+        let host = state
+            .discovery
+            .find_device(&room.host_peer_id)
+            .ok_or_else(|| "房主当前不在线".to_string())?;
+        post_lan_json_response(
+            &host,
+            "/games/gomoku/move",
+            &serde_json::json!({
+                "room_id": room_id,
+                "actor_peer_id": state.library.device_id(),
+                "x": x,
+                "y": y,
+            }),
+        )?
+    };
+    state.game.accept_room(snapshot.clone())?;
+    broadcast_if_local_host(&state, &snapshot);
+    Ok(snapshot)
+}
+
+#[tauri::command]
+pub fn request_gomoku_restart(
+    state: State<'_, AppState>,
+    room_id: String,
+) -> Result<GameRoomSnapshot, String> {
+    let room = state
+        .game
+        .find_room(&room_id)
+        .ok_or_else(|| "小游戏房间不存在".to_string())?;
+    let snapshot = if room.host_peer_id == state.library.device_id() {
+        state
+            .game
+            .request_restart(&room_id, &state.library.device_id())?
+    } else {
+        let host = state
+            .discovery
+            .find_device(&room.host_peer_id)
+            .ok_or_else(|| "房主当前不在线".to_string())?;
+        post_lan_json_response(
+            &host,
+            "/games/gomoku/restart/request",
+            &serde_json::json!({
+                "room_id": room_id,
+                "actor_peer_id": state.library.device_id(),
+            }),
+        )?
+    };
+    state.game.accept_room(snapshot.clone())?;
+    broadcast_if_local_host(&state, &snapshot);
+    Ok(snapshot)
+}
+
+#[tauri::command]
+pub fn accept_gomoku_restart(
+    state: State<'_, AppState>,
+    room_id: String,
+) -> Result<GameRoomSnapshot, String> {
+    let room = state
+        .game
+        .find_room(&room_id)
+        .ok_or_else(|| "小游戏房间不存在".to_string())?;
+    let snapshot = if room.host_peer_id == state.library.device_id() {
+        state
+            .game
+            .accept_restart(&room_id, &state.library.device_id())?
+    } else {
+        let host = state
+            .discovery
+            .find_device(&room.host_peer_id)
+            .ok_or_else(|| "房主当前不在线".to_string())?;
+        post_lan_json_response(
+            &host,
+            "/games/gomoku/restart/accept",
+            &serde_json::json!({
+                "room_id": room_id,
+                "actor_peer_id": state.library.device_id(),
+            }),
+        )?
+    };
+    state.game.accept_room(snapshot.clone())?;
+    broadcast_if_local_host(&state, &snapshot);
+    Ok(snapshot)
+}
+
+#[tauri::command]
+pub fn surrender_gomoku(
+    state: State<'_, AppState>,
+    room_id: String,
+) -> Result<GameRoomSnapshot, String> {
+    let room = state
+        .game
+        .find_room(&room_id)
+        .ok_or_else(|| "小游戏房间不存在".to_string())?;
+    let snapshot = if room.host_peer_id == state.library.device_id() {
+        state.game.surrender(&room_id, &state.library.device_id())?
+    } else {
+        let host = state
+            .discovery
+            .find_device(&room.host_peer_id)
+            .ok_or_else(|| "房主当前不在线".to_string())?;
+        post_lan_json_response(
+            &host,
+            "/games/gomoku/surrender",
+            &serde_json::json!({
+                "room_id": room_id,
+                "actor_peer_id": state.library.device_id(),
+            }),
+        )?
+    };
+    state.game.accept_room(snapshot.clone())?;
+    broadcast_if_local_host(&state, &snapshot);
+    Ok(snapshot)
 }
 
 #[tauri::command]
@@ -196,16 +473,15 @@ pub fn leave_watch_room(state: State<'_, AppState>, room_id: String) -> Result<(
                 "user_id": local_id,
             }),
         )?;
-        let _ = state.watch.leave_room(&room.room_id, &state.library.device_id())?;
+        let _ = state
+            .watch
+            .leave_room(&room.room_id, &state.library.device_id())?;
     }
     Ok(())
 }
 
 #[tauri::command]
-pub fn end_watch_room(
-    state: State<'_, AppState>,
-    room_id: String,
-) -> Result<(), String> {
+pub fn end_watch_room(state: State<'_, AppState>, room_id: String) -> Result<(), String> {
     state.watch.end_room(&room_id, &state.library.device_id())?;
     broadcast_watch_room_end(&state, &room_id);
     Ok(())
@@ -267,7 +543,11 @@ pub async fn activate_watch_room(
     } else {
         state.watch_player.hide(&app)?;
     }
-    Ok(WatchActivation { room, is_host, is_member })
+    Ok(WatchActivation {
+        room,
+        is_host,
+        is_member,
+    })
 }
 
 #[tauri::command]
@@ -907,6 +1187,43 @@ pub fn broadcast_local_watch_rooms(state: &AppState) {
     }
 }
 
+pub fn broadcast_game_room_for_state(state: &AppState, snapshot: &GameRoomSnapshot) {
+    let local_id = state.library.device_id();
+    if let Ok(body) = serde_json::to_string(snapshot) {
+        for device in state
+            .discovery
+            .list_devices()
+            .into_iter()
+            .filter(|device| device.online && device.id != local_id)
+        {
+            post_lan_json(&device, "/games/rooms/update", &body);
+        }
+    }
+}
+
+pub fn broadcast_local_game_rooms(state: &AppState) {
+    let rooms = state.game.hosted_rooms();
+    if rooms.is_empty() {
+        return;
+    }
+    for snapshot in rooms {
+        broadcast_game_room_for_state(state, &snapshot);
+    }
+}
+
+pub fn broadcast_game_room_end_for_state(state: &AppState, room_id: &str) {
+    let local_id = state.library.device_id();
+    let body = serde_json::json!({ "room_id": room_id }).to_string();
+    for device in state
+        .discovery
+        .list_devices()
+        .into_iter()
+        .filter(|device| device.online && device.id != local_id)
+    {
+        post_lan_json(&device, "/games/rooms/end", &body);
+    }
+}
+
 pub fn broadcast_watch_room_end_for_state(state: &AppState, room_id: &str) {
     let local_id = state.library.device_id();
     let body = serde_json::json!({ "room_id": room_id }).to_string();
@@ -922,6 +1239,20 @@ pub fn broadcast_watch_room_end_for_state(state: &AppState, room_id: &str) {
 
 fn broadcast_watch_room_end(state: &State<'_, AppState>, room_id: &str) {
     broadcast_watch_room_end_for_state(state.inner(), room_id);
+}
+
+fn broadcast_game_room(state: &State<'_, AppState>, snapshot: &GameRoomSnapshot) {
+    broadcast_game_room_for_state(state.inner(), snapshot);
+}
+
+fn broadcast_game_room_end(state: &State<'_, AppState>, room_id: &str) {
+    broadcast_game_room_end_for_state(state.inner(), room_id);
+}
+
+fn broadcast_if_local_host(state: &State<'_, AppState>, snapshot: &GameRoomSnapshot) {
+    if snapshot.room.host_peer_id == state.library.device_id() {
+        broadcast_game_room(state, snapshot);
+    }
 }
 
 fn broadcast_watch_chat_message(state: &State<'_, AppState>, message: &WatchChatMessage) {

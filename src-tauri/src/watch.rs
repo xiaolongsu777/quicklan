@@ -208,7 +208,10 @@ impl WatchService {
         self.save()
     }
 
-    pub fn join_room_request(&self, request: WatchJoinRequest) -> Result<WatchJoinResponse, String> {
+    pub fn join_room_request(
+        &self,
+        request: WatchJoinRequest,
+    ) -> Result<WatchJoinResponse, String> {
         let mut room = self
             .find_room(&request.room_id)
             .ok_or_else(|| "观影房间不存在".to_string())?;
@@ -362,8 +365,7 @@ impl WatchService {
 
     fn save(&self) -> Result<(), String> {
         if let Some(parent) = self.path.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|err| format!("创建观影目录失败: {err}"))?;
+            fs::create_dir_all(parent).map_err(|err| format!("创建观影目录失败: {err}"))?;
         }
         let state = self.lock()?;
         let content = serde_json::to_string_pretty(&*state)
@@ -392,7 +394,6 @@ impl WatchService {
             .retain(|message| active_room_ids.contains(&message.room_id));
         Ok(true)
     }
-
 }
 
 fn upsert_room(rooms: &mut Vec<WatchRoom>, room: WatchRoom) {

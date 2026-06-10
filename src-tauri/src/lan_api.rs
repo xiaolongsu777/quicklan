@@ -1,9 +1,10 @@
 use crate::{
     chat::{ChatMessagePayload, ChatRoom, ChatService},
+    game::{GameJoinRequest, GameRoomSnapshot, GameService},
     library::LibraryService,
     protocol::Manifest,
     settings::SettingsService,
-    watch::{WatchChatMessage, WatchJoinRequest, WatchRoom, WatchSyncPayload, WatchService},
+    watch::{WatchChatMessage, WatchJoinRequest, WatchRoom, WatchService, WatchSyncPayload},
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -36,6 +37,7 @@ pub fn start(
     settings: SettingsService,
     chat: ChatService,
     watch: WatchService,
+    game: GameService,
     requested_port: u16,
 ) -> u16 {
     for port in requested_port..requested_port + 20 {
@@ -45,6 +47,7 @@ pub fn start(
         let settings = settings.clone();
         let chat = chat.clone();
         let watch = watch.clone();
+        let game = game.clone();
         let listener = std::net::TcpListener::bind(&bind);
         let Ok(listener) = listener else {
             continue;
@@ -69,8 +72,10 @@ pub fn start(
                 let settings = settings.clone();
                 let chat = chat.clone();
                 let watch = watch.clone();
+                let game = game.clone();
                 tauri::async_runtime::spawn(async move {
-                    let _ = handle_connection(app, library, settings, chat, watch, stream).await;
+                    let _ =
+                        handle_connection(app, library, settings, chat, watch, game, stream).await;
                 });
             }
         });
@@ -85,6 +90,7 @@ async fn handle_connection(
     settings: SettingsService,
     chat: ChatService,
     watch: WatchService,
+    game: GameService,
     mut stream: TcpStream,
 ) -> Result<(), String> {
     let mut buf = vec![0_u8; 128 * 1024];
@@ -239,6 +245,135 @@ async fn handle_connection(
                 let _ = app.emit("watch-sync-received", payload);
             }
             write_json(&mut stream, 202, json!({"ok":true})).await
+        }
+        ("POST", "/games/rooms/update") => {
+            if let Ok(snapshot) = serde_json::from_str::<GameRoomSnapshot>(body) {
+                game.accept_room(snapshot.clone())?;
+                let _ = app.emit("game-room-updated", snapshot.clone());
+                let _ = app.emit("game-state-updated", snapshot);
+            }
+            write_json(&mut stream, 202, json!({"ok":true})).await
+        }
+        ("POST", "/games/rooms/end") => {
+            if let Ok(req) = serde_json::from_str::<DeleteRoomRequest>(body) {
+                game.remove_room(&req.room_id)?;
+                let _ = app.emit("game-room-deleted", req.room_id);
+            }
+            write_json(&mut stream, 202, json!({"ok":true})).await
+        }
+        ("POST", "/games/rooms/join") => {
+            if let Ok(request) = serde_json::from_str::<GameJoinRequest>(body) {
+                let response = game.join_room_request(request)?;
+                if let Some(snapshot) = response.snapshot.clone() {
+                    let _ = app.emit("game-room-updated", snapshot.clone());
+                    let _ = app.emit("game-state-updated", snapshot);
+                    if let Some(state) = app.try_state::<crate::AppState>() {
+                        crate::commands::broadcast_game_room_for_state(
+                            &state,
+                            response.snapshot.as_ref().expect("snapshot exists"),
+                        );
+                    }
+                }
+                return write_json(&mut stream, 200, json!(response)).await;
+            }
+            write_json(&mut stream, 400, json!({"error":"bad_request"})).await
+        }
+        ("POST", "/games/rooms/leave") => {
+            if let Ok(req) = serde_json::from_str::<serde_json::Value>(body) {
+                if let (Some(room_id), Some(user_id)) = (
+                    req.get("room_id").and_then(|value| value.as_str()),
+                    req.get("user_id").and_then(|value| value.as_str()),
+                ) {
+                    match game.leave_room(room_id, user_id)? {
+                        Some(snapshot) => {
+                            let _ = app.emit("game-room-updated", snapshot.clone());
+                            let _ = app.emit("game-state-updated", snapshot.clone());
+                            if let Some(state) = app.try_state::<crate::AppState>() {
+                                crate::commands::broadcast_game_room_for_state(&state, &snapshot);
+                            }
+                            return write_json(&mut stream, 200, json!(snapshot)).await;
+                        }
+                        None => {
+                            let _ = app.emit("game-room-deleted", room_id.to_string());
+                            if let Some(state) = app.try_state::<crate::AppState>() {
+                                crate::commands::broadcast_game_room_end_for_state(&state, room_id);
+                            }
+                        }
+                    }
+                }
+            }
+            write_json(&mut stream, 202, json!({"ok":true})).await
+        }
+        ("POST", "/games/gomoku/move") => {
+            if let Ok(req) = serde_json::from_str::<serde_json::Value>(body) {
+                if let (Some(room_id), Some(actor_peer_id), Some(x), Some(y)) = (
+                    req.get("room_id").and_then(|value| value.as_str()),
+                    req.get("actor_peer_id").and_then(|value| value.as_str()),
+                    req.get("x").and_then(|value| value.as_u64()),
+                    req.get("y").and_then(|value| value.as_u64()),
+                ) {
+                    let snapshot =
+                        game.request_move(room_id, actor_peer_id, x as usize, y as usize)?;
+                    let _ = app.emit("game-room-updated", snapshot.clone());
+                    let _ = app.emit("game-state-updated", snapshot.clone());
+                    if let Some(state) = app.try_state::<crate::AppState>() {
+                        crate::commands::broadcast_game_room_for_state(&state, &snapshot);
+                    }
+                    return write_json(&mut stream, 200, json!(snapshot)).await;
+                }
+            }
+            write_json(&mut stream, 400, json!({"error":"bad_request"})).await
+        }
+        ("POST", "/games/gomoku/restart/request") => {
+            if let Ok(req) = serde_json::from_str::<serde_json::Value>(body) {
+                if let (Some(room_id), Some(actor_peer_id)) = (
+                    req.get("room_id").and_then(|value| value.as_str()),
+                    req.get("actor_peer_id").and_then(|value| value.as_str()),
+                ) {
+                    let snapshot = game.request_restart(room_id, actor_peer_id)?;
+                    let _ = app.emit("game-room-updated", snapshot.clone());
+                    let _ = app.emit("game-state-updated", snapshot.clone());
+                    if let Some(state) = app.try_state::<crate::AppState>() {
+                        crate::commands::broadcast_game_room_for_state(&state, &snapshot);
+                    }
+                    return write_json(&mut stream, 200, json!(snapshot)).await;
+                }
+            }
+            write_json(&mut stream, 400, json!({"error":"bad_request"})).await
+        }
+        ("POST", "/games/gomoku/restart/accept") => {
+            if let Ok(req) = serde_json::from_str::<serde_json::Value>(body) {
+                if let (Some(room_id), Some(actor_peer_id)) = (
+                    req.get("room_id").and_then(|value| value.as_str()),
+                    req.get("actor_peer_id").and_then(|value| value.as_str()),
+                ) {
+                    let snapshot = game.accept_restart(room_id, actor_peer_id)?;
+                    let _ = app.emit("game-room-updated", snapshot.clone());
+                    let _ = app.emit("game-state-updated", snapshot.clone());
+                    if let Some(state) = app.try_state::<crate::AppState>() {
+                        crate::commands::broadcast_game_room_for_state(&state, &snapshot);
+                    }
+                    return write_json(&mut stream, 200, json!(snapshot)).await;
+                }
+            }
+            write_json(&mut stream, 400, json!({"error":"bad_request"})).await
+        }
+        ("POST", "/games/gomoku/surrender") => {
+            if let Ok(req) = serde_json::from_str::<serde_json::Value>(body) {
+                if let (Some(room_id), Some(actor_peer_id)) = (
+                    req.get("room_id").and_then(|value| value.as_str()),
+                    req.get("actor_peer_id").and_then(|value| value.as_str()),
+                ) {
+                    let snapshot = game.surrender(room_id, actor_peer_id)?;
+                    let _ = app.emit("game-room-updated", snapshot.clone());
+                    let _ = app.emit("game-state-updated", snapshot.clone());
+                    if let Some(state) = app.try_state::<crate::AppState>() {
+                        crate::commands::broadcast_game_room_for_state(&state, &snapshot);
+                    }
+                    return write_json(&mut stream, 200, json!(snapshot)).await;
+                }
+            }
+            write_json(&mut stream, 400, json!({"error":"bad_request"})).await
         }
         _ => write_json(&mut stream, 404, json!({"error":"not_found"})).await,
     }

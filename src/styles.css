@@ -115,6 +115,10 @@ h2 {
   gap: 8px;
 }
 
+.section-hidden {
+  display: none;
+}
+
 .tab {
   display: inline-flex;
   align-items: center;
@@ -493,9 +497,21 @@ select {
   gap: 16px;
 }
 
+.game-layout {
+  min-height: min(680px, calc(100vh - 280px));
+  display: grid;
+  grid-template-columns: minmax(240px, 0.32fr) minmax(0, 1fr);
+  gap: 16px;
+}
+
 .watch-sidebar,
 .watch-main,
 .watch-chat-panel {
+  min-height: 0;
+}
+
+.game-sidebar,
+.game-main {
   min-height: 0;
 }
 
@@ -561,6 +577,132 @@ select {
 
 .watch-player-placeholder.ready {
   color: #d9e6f2;
+}
+
+.game-main {
+  align-content: start;
+}
+
+.game-placeholder {
+  min-height: 520px;
+  border: 1px solid #dce4ed;
+  border-radius: 10px;
+  background:
+    radial-gradient(circle at top left, rgb(42 120 210 / 0.1), transparent 42%),
+    linear-gradient(180deg, #f8fbff, #edf4fb);
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: 8px;
+  text-align: center;
+  padding: 24px;
+}
+
+.game-meta,
+.game-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.game-actions {
+  display: none;
+}
+
+.game-main > .panel-title > .row-actions {
+  display: none;
+}
+
+.game-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+}
+
+.game-topbar-left,
+.game-topbar-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.turn-pill.active {
+  border-color: #176bc3;
+  background: #eaf4ff;
+  color: #1761a6;
+  box-shadow: inset 0 0 0 1px rgb(23 107 195 / 10%);
+}
+
+.game-result-banner {
+  border: 1px solid #bfe6d1;
+  border-radius: 10px;
+  background: linear-gradient(180deg, #eefbf3, #e3f5ea);
+  color: #12683f;
+  padding: 12px 14px;
+  font-weight: 800;
+}
+
+.gomoku-board {
+  width: min(100%, 720px);
+  aspect-ratio: 1;
+  display: grid;
+  grid-template-columns: repeat(15, 1fr);
+  gap: 0;
+  border: 12px solid #b8843b;
+  border-radius: 12px;
+  background-color: #ddb776;
+  background-image:
+    linear-gradient(
+      to right,
+      transparent calc(50% - 0.5px),
+      #a87734 calc(50% - 0.5px),
+      #a87734 calc(50% + 0.5px),
+      transparent calc(50% + 0.5px)
+    ),
+    linear-gradient(
+      to bottom,
+      transparent calc(50% - 0.5px),
+      #a87734 calc(50% - 0.5px),
+      #a87734 calc(50% + 0.5px),
+      transparent calc(50% + 0.5px)
+    );
+  background-size: calc(100% / 15) 100%, 100% calc(100% / 15);
+  background-repeat: repeat-x, repeat-y;
+  padding: 0;
+  overflow: hidden;
+}
+
+.gomoku-cell {
+  position: relative;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  padding: 0;
+  min-width: 0;
+  min-height: 0;
+}
+
+.gomoku-cell.last {
+  background:
+    radial-gradient(circle at center, rgb(30 108 196 / 0.22), transparent 48%);
+}
+
+.gomoku-stone {
+  position: absolute;
+  inset: 17%;
+  border-radius: 999px;
+  box-shadow: 0 3px 6px rgb(0 0 0 / 18%);
+}
+
+.gomoku-stone.black {
+  background: radial-gradient(circle at 30% 30%, #4e5862, #11161c 68%);
+}
+
+.gomoku-stone.white {
+  background: radial-gradient(circle at 30% 30%, #ffffff, #dfe6ef 70%);
+  border: 1px solid #cfd7e2;
 }
 
 .chat-sidebar,
@@ -955,6 +1097,7 @@ label {
   .grid.two,
   .chat-layout,
   .watch-layout,
+  .game-layout,
   .resource,
   .form-grid {
     grid-template-columns: 1fr;

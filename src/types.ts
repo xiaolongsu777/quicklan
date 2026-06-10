@@ -161,6 +161,71 @@ export type WatchActivation = {
   is_member: boolean;
 };
 
+export type GameType = "gomoku";
+export type GameRoomVisibility = "public" | "password";
+export type GameRoomStatus = "waiting" | "playing" | "finished";
+
+export type GameRoomSummary = {
+  room_id: string;
+  game_type: GameType;
+  room_name: string;
+  host_peer_id: string;
+  host_name: string;
+  guest_peer_id: string | null;
+  guest_name: string | null;
+  visibility: GameRoomVisibility;
+  password_hash: string | null;
+  status: GameRoomStatus;
+  created_at: number;
+  updated_at: number;
+};
+
+export type GomokuPoint = {
+  x: number;
+  y: number;
+};
+
+export type GomokuMoveRecord = {
+  x: number;
+  y: number;
+  color: 1 | 2;
+  peer_id: string;
+  timestamp: number;
+};
+
+export type GomokuState = {
+  room_id: string;
+  board: number[][];
+  current_turn: 1 | 2;
+  black_peer_id: string;
+  white_peer_id: string | null;
+  winner: 1 | 2 | null;
+  last_move: GomokuPoint | null;
+  move_history: GomokuMoveRecord[];
+  restart_requested_by: string | null;
+  ended_reason: string | null;
+  status_text: string;
+};
+
+export type GameRoomSnapshot = {
+  room: GameRoomSummary;
+  gomoku_state: GomokuState;
+  version: number;
+  last_event_id: string;
+};
+
+export type GameJoinResponse = {
+  accepted: boolean;
+  reason: string | null;
+  snapshot: GameRoomSnapshot | null;
+};
+
+export type GameActivation = {
+  room: GameRoomSummary;
+  is_host: boolean;
+  is_member: boolean;
+};
+
 export type WatchBounds = {
   x: number;
   y: number;

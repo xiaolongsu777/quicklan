@@ -77,7 +77,10 @@ pub async fn unique_destination(dir: &Path, file_name: &str) -> Result<PathBuf, 
         .file_stem()
         .and_then(|value| value.to_str())
         .unwrap_or("download");
-    let ext = original.extension().and_then(|value| value.to_str()).unwrap_or("");
+    let ext = original
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("");
     let mut attempt = 0_u32;
     loop {
         let candidate_name = if attempt == 0 {
@@ -185,8 +188,8 @@ fn collect_path(path: &Path, files: &mut Vec<PathBuf>) -> Result<(), String> {
         return Ok(());
     }
     if path.is_dir() {
-        for entry in fs::read_dir(path)
-            .map_err(|err| format!("读取目录失败 {}: {err}", path.display()))?
+        for entry in
+            fs::read_dir(path).map_err(|err| format!("读取目录失败 {}: {err}", path.display()))?
         {
             let entry = entry.map_err(|err| format!("读取目录条目失败: {err}"))?;
             collect_path(&entry.path(), files)?;

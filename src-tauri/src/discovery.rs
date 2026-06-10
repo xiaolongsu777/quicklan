@@ -2,8 +2,8 @@ use crate::{
     lan_api,
     library::LibraryService,
     protocol::{
-        DeviceInfo, DiscoveryPacket, KnownPeerHint, NetworkStatus, DEVICE_TTL_SECS,
-        DISCOVERY_PORT, LIBRARY_ANNOUNCE_INTERVAL_SECS, PRESENCE_INTERVAL_SECS,
+        DeviceInfo, DiscoveryPacket, KnownPeerHint, NetworkStatus, DEVICE_TTL_SECS, DISCOVERY_PORT,
+        LIBRARY_ANNOUNCE_INTERVAL_SECS, PRESENCE_INTERVAL_SECS,
     },
     settings::SettingsService,
     storage,
@@ -251,13 +251,14 @@ impl DiscoveryService {
                                 CandidateSource::Introduced
                             };
                             service.remember_candidate_ip(ip, source);
-                            let packet_type = if round % 4 == 0 { "library" } else { "presence" };
-                            let packet =
-                                service.packet(packet_type, Some(&known.device_id), true);
-                            let _ = send_discovery_packet(
-                                &packet,
-                                SocketAddr::new(ip, DISCOVERY_PORT),
-                            );
+                            let packet_type = if round % 4 == 0 {
+                                "library"
+                            } else {
+                                "presence"
+                            };
+                            let packet = service.packet(packet_type, Some(&known.device_id), true);
+                            let _ =
+                                send_discovery_packet(&packet, SocketAddr::new(ip, DISCOVERY_PORT));
                         }
                     }
                 }
@@ -391,7 +392,8 @@ impl DiscoveryService {
                     let device_id = packet.device_id.clone();
                     thread::spawn(move || {
                         if let Ok(manifest) = lan_api::fetch_manifest_blocking(&ip, api_port) {
-                            let _ = library.merge_manifest(manifest, ip.clone(), tcp_port, api_port);
+                            let _ =
+                                library.merge_manifest(manifest, ip.clone(), tcp_port, api_port);
                             let _ = library.mark_known_device_intro(&device_id);
                             let _ = app.emit(
                                 "library-updated",
@@ -507,10 +509,11 @@ impl DiscoveryService {
     }
 
     fn candidate_source_for_ip(&self, target_ip: &IpAddr) -> Option<CandidateSource> {
-        self.candidate_ips
-            .lock()
-            .ok()
-            .and_then(|candidates| candidates.get(&target_ip.to_string()).map(|peer| peer.source))
+        self.candidate_ips.lock().ok().and_then(|candidates| {
+            candidates
+                .get(&target_ip.to_string())
+                .map(|peer| peer.source)
+        })
     }
 
     fn candidate_targets(&self) -> Vec<(IpAddr, CandidateSource)> {
@@ -519,7 +522,9 @@ impl DiscoveryService {
             .map(|candidates| {
                 candidates
                     .iter()
-                    .filter_map(|(ip, peer)| ip.parse::<IpAddr>().ok().map(|addr| (addr, peer.source)))
+                    .filter_map(|(ip, peer)| {
+                        ip.parse::<IpAddr>().ok().map(|addr| (addr, peer.source))
+                    })
                     .collect()
             })
             .unwrap_or_default()
@@ -536,7 +541,8 @@ fn broadcast_packet(packet: &DiscoveryPacket) -> Result<(), String> {
     let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))
         .map_err(|err| format!("缁戝畾 UDP 骞挎挱澶辫触: {err}"))?;
     let _ = socket.set_broadcast(true);
-    let payload = serde_json::to_vec(packet).map_err(|err| format!("缂栫爜鍙戠幇骞挎挱澶辫触: {err}"))?;
+    let payload =
+        serde_json::to_vec(packet).map_err(|err| format!("缂栫爜鍙戠幇骞挎挱澶辫触: {err}"))?;
     for target in broadcast_targets() {
         let _ = socket.send_to(
             &payload,
@@ -550,7 +556,8 @@ fn send_discovery_packet(packet: &DiscoveryPacket, target: SocketAddr) -> Result
     let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))
         .map_err(|err| format!("缁戝畾 UDP 鎺㈡祴澶辫触: {err}"))?;
     let _ = socket.set_broadcast(true);
-    let payload = serde_json::to_vec(packet).map_err(|err| format!("缂栫爜鍙戠幇鎺㈡祴澶辫触: {err}"))?;
+    let payload =
+        serde_json::to_vec(packet).map_err(|err| format!("缂栫爜鍙戠幇鎺㈡祴澶辫触: {err}"))?;
     socket
         .send_to(&payload, target)
         .map_err(|err| format!("鍙戦€佸彂鐜版帰娴嬪け璐? {err}"))?;
