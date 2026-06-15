@@ -118,6 +118,7 @@ impl WatchService {
             path,
             local_device_id,
         };
+        let _ = service.clear_invalid_local_ezmovie_cache();
         let _ = service.save();
         service
     }
@@ -504,6 +505,29 @@ impl WatchService {
             .retain(|room_id, _| active_room_ids.contains(room_id));
         Ok(true)
     }
+
+    fn clear_invalid_local_ezmovie_cache(&self) -> Result<bool, String> {
+        let mut state = self.lock()?;
+        let mut changed = false;
+        let now = now_secs();
+        for room in &mut state.rooms {
+            if room.source_kind != WatchSourceKind::LocalEzmovie {
+                continue;
+            }
+            if has_valid_local_ezmovie_cache(room) {
+                continue;
+            }
+            room.source_kind = WatchSourceKind::Url;
+            room.current_url = None;
+            room.stream_url = None;
+            room.stream_preview_url = None;
+            room.stream_room_id = None;
+            room.stream_code = None;
+            room.updated_at = now;
+            changed = true;
+        }
+        Ok(changed)
+    }
 }
 
 fn upsert_room(rooms: &mut Vec<WatchRoom>, room: WatchRoom) {
@@ -567,6 +591,36 @@ pub fn validate_watch_url(value: &str) -> Result<(), String> {
     } else {
         Err("视频链接只支持 http 或 https".to_string())
     }
+}
+
+fn has_valid_local_ezmovie_cache(room: &WatchRoom) -> bool {
+    room.stream_url
+        .as_deref()
+        .is_some_and(is_private_http_url)
+        && room
+            .stream_preview_url
+            .as_deref()
+            .is_some_and(is_private_http_url)
+}
+
+fn is_private_http_url(value: &str) -> bool {
+    let Some(rest) = value
+        .trim()
+        .strip_prefix("http://")
+        .or_else(|| value.trim().strip_prefix("https://"))
+    else {
+        return false;
+    };
+    let authority = rest.split('/').next().unwrap_or_default();
+    let host = authority.split(':').next().unwrap_or_default();
+    if host == "127.0.0.1" || host == "localhost" {
+        return false;
+    }
+    let Ok(std::net::IpAddr::V4(ipv4)) = host.parse::<std::net::IpAddr>() else {
+        return false;
+    };
+    let [a, b, _, _] = ipv4.octets();
+    a == 10 || (a == 172 && (16..=31).contains(&b)) || (a == 192 && b == 168)
 }
 
 fn now_secs() -> i64 {

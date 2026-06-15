@@ -1001,7 +1001,6 @@ struct EzmovieSessionResponse {
     url: Option<String>,
     preview_url: Option<String>,
     lan_preview_url: Option<String>,
-    quick_lan_import_url: Option<String>,
     room_id: Option<String>,
     stream_code: Option<String>,
 }
@@ -1043,19 +1042,23 @@ fn fetch_local_ezmovie_stream() -> Result<Option<LocalEzmovieStreamInfo>, String
     if !session.active {
         return Ok(None);
     }
+    let lan_host = resolve_ezmovie_lan_host(&session)?;
+    let session = EzmovieSessionResponse {
+        active: session.active,
+        url: Some(format!("http://{lan_host}:18333/")),
+        preview_url: Some(format!("http://{lan_host}:18333/")),
+        lan_preview_url: Some(format!("http://{lan_host}:18333/")),
+        room_id: session.room_id,
+        stream_code: session.stream_code,
+    };
 
     let stream_url = session
         .url
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| "ezmovie 会话缺少可共享的直播地址".to_string())?;
-    validate_local_ezmovie_share_url(&stream_url)?;
+    let lan_host = extract_http_host(&stream_url)?.to_owned();
 
-    let quick_lan_import_url = session
-        .quick_lan_import_url
-        .or_else(|| session.lan_preview_url.clone())
-        .or_else(|| session.preview_url.clone())
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| "ezmovie session is missing a QuickLAN import URL".to_string())?;
+    let quick_lan_import_url = format!("http://{lan_host}:18333/");
     validate_local_ezmovie_share_url(&quick_lan_import_url)?;
 
     let lan_preview_url = session
@@ -1080,6 +1083,18 @@ fn fetch_local_ezmovie_stream() -> Result<Option<LocalEzmovieStreamInfo>, String
     }))
 }
 
+fn resolve_ezmovie_lan_host(session: &EzmovieSessionResponse) -> Result<String, String> {
+    [
+        session.lan_preview_url.as_deref(),
+        session.preview_url.as_deref(),
+        session.url.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .find_map(|value| extract_private_ipv4_host(value).ok())
+    .ok_or_else(|| "ezmovie 鍏变韩鍦板潃蹇呴』浣跨敤灞€鍩熺綉 IPv4 鍦板潃".to_string())
+}
+
 fn validate_local_ezmovie_share_url(value: &str) -> Result<(), String> {
     let host = extract_http_host(value)?;
     if host == "127.0.0.1" || host == "localhost" {
@@ -1092,6 +1107,11 @@ fn validate_local_ezmovie_share_url(value: &str) -> Result<(), String> {
         return Err("ezmovie 共享地址必须使用局域网 IPv4 地址".to_string());
     }
     Ok(())
+}
+
+fn extract_private_ipv4_host(value: &str) -> Result<String, String> {
+    validate_local_ezmovie_share_url(value)?;
+    Ok(extract_http_host(value)?.to_string())
 }
 
 fn extract_http_host(value: &str) -> Result<&str, String> {
