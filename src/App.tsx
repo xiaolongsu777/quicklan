@@ -2794,12 +2794,92 @@ function StatusBadge({ status }: { status: TransferInfo["status"] }) {
   return <span className={`badge ${status}`}>{labels[status]}</span>;
 }
 
+const INCOMING_WINDOW_RETRY_LIMIT = 10;
+const INCOMING_WINDOW_RETRY_MS = 300;
+
+type IncomingWindowPhase = "loading" | "ready" | "missing" | "failed";
+
 function IncomingWindow({ transferId }: { transferId: string }) {
   const [transfer, setTransfer] = useState<TransferInfo | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [phase, setPhase] = useState<IncomingWindowPhase>("loading");
 
   useEffect(() => {
-    void getTransfer(transferId).then(setTransfer);
+    setTransfer(null);
+    setError(null);
+    setPhase("loading");
+
+    if (!transferId.trim()) {
+      setPhase("failed");
+      setError("缺少传输 ID，请关闭窗口后重试一次。");
+      return;
+    }
+
+    let cancelled = false;
+    let attempts = 0;
+    let timer: number | null = null;
+
+    const syncTransfer = (next: TransferInfo | null) => {
+      if (!next || next.id !== transferId || cancelled) return false;
+      setTransfer(next);
+      setPhase("ready");
+      setError(null);
+      return true;
+    };
+
+    const scheduleRetry = () => {
+      attempts += 1;
+      if (attempts >= INCOMING_WINDOW_RETRY_LIMIT) {
+        setPhase("missing");
+        setError("未能读取到这条传输请求，可能已失效或窗口启动过慢。");
+        return;
+      }
+      timer = window.setTimeout(() => {
+        void loadTransfer();
+      }, INCOMING_WINDOW_RETRY_MS);
+    };
+
+    const loadTransfer = async () => {
+      try {
+        const next = await getTransfer(transferId);
+        if (!syncTransfer(next) && !cancelled) {
+          scheduleRetry();
+        }
+      } catch (err) {
+        if (cancelled) return;
+        const message = err instanceof Error ? err.message : String(err);
+        if (attempts + 1 >= INCOMING_WINDOW_RETRY_LIMIT) {
+          setPhase("failed");
+          setError(message);
+          return;
+        }
+        scheduleRetry();
+      }
+    };
+
+    const syncPayload = (payload: TransferPayload | IncomingTransferPayload) => {
+      const next = unwrapTransfer(payload as TransferPayload);
+      syncTransfer(next);
+    };
+
+    const subscriptions = Promise.all([
+      listen<IncomingTransferPayload>("incoming-transfer", (event) => syncPayload(event.payload)),
+      listen<TransferPayload>("transfer-progress", (event) => syncPayload(event.payload)),
+      listen<TransferPayload>("transfer-completed", (event) => syncPayload(event.payload)),
+      listen<TransferPayload>("transfer-failed", (event) => syncPayload(event.payload)),
+    ]);
+
+    void loadTransfer();
+
+    return () => {
+      cancelled = true;
+      if (timer !== null) {
+        window.clearTimeout(timer);
+      }
+      void subscriptions.then((items) => {
+        items.forEach((unsubscribe) => unsubscribe());
+      });
+    };
   }, [transferId]);
 
   async function answer(accepted: boolean) {
@@ -2815,10 +2895,22 @@ function IncomingWindow({ transferId }: { transferId: string }) {
     }
   }
 
+  const canAnswer =
+    transfer?.status === "pending" || transfer?.status === "waiting_for_receiver";
+  const terminalMessage =
+    transfer?.status === "completed"
+        ? "这条传输已经完成。"
+        : transfer?.status === "rejected"
+          ? "这条传输已被拒绝。"
+          : transfer?.status === "failed"
+            ? transfer.message ?? "这条传输已经失败。"
+          : null;
+
   return (
     <main className="incoming-window">
       <h1>接收文件？</h1>
-      {transfer ? (
+      {phase === "loading" && <p>正在读取传输请求...</p>}
+      {phase !== "loading" && transfer ? (
         <>
           <p>
             <strong>{transfer.peer_name}</strong> 想发送文件给你
@@ -2827,17 +2919,35 @@ function IncomingWindow({ transferId }: { transferId: string }) {
             <strong>{transfer.file_name}</strong>
             <span>{formatBytes(transfer.file_size)}</span>
           </div>
+          {transfer.message && <p>{transfer.message}</p>}
+          {terminalMessage && <p>{terminalMessage}</p>}
           {error && <div className="error">{error}</div>}
           <div className="modal-actions">
-            <button onClick={() => void answer(false)}>拒绝</button>
-            <button className="primary" onClick={() => void answer(true)}>
-              <Check size={17} /> 接收
+            {canAnswer ? (
+              <>
+                <button onClick={() => void answer(false)}>拒绝</button>
+                <button className="primary" onClick={() => void answer(true)}>
+                  <Check size={17} /> 接收
+                </button>
+              </>
+            ) : (
+              <button className="primary" onClick={() => void getCurrentWindow().close()}>
+                关闭
+              </button>
+            )}
+          </div>
+        </>
+      ) : null}
+      {(phase === "missing" || phase === "failed") && !transfer ? (
+        <>
+          <p>{error ?? "接收请求已失效，请关闭窗口后重试。"}</p>
+          <div className="modal-actions">
+            <button className="primary" onClick={() => void getCurrentWindow().close()}>
+              关闭
             </button>
           </div>
         </>
-      ) : (
-        <p>正在读取传输请求...</p>
-      )}
+      ) : null}
     </main>
   );
 }

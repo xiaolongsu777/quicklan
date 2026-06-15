@@ -1092,7 +1092,7 @@ fn resolve_ezmovie_lan_host(session: &EzmovieSessionResponse) -> Result<String, 
     .into_iter()
     .flatten()
     .find_map(|value| extract_private_ipv4_host(value).ok())
-    .ok_or_else(|| "ezmovie 鍏变韩鍦板潃蹇呴』浣跨敤灞€鍩熺綉 IPv4 鍦板潃".to_string())
+    .ok_or_else(|| "ezmovie 共享地址必须使用局域网 IPv4 地址".to_string())
 }
 
 fn validate_local_ezmovie_share_url(value: &str) -> Result<(), String> {
@@ -1103,7 +1103,7 @@ fn validate_local_ezmovie_share_url(value: &str) -> Result<(), String> {
     let ip = host
         .parse::<std::net::IpAddr>()
         .map_err(|_| "ezmovie 共享地址必须使用局域网 IPv4 地址".to_string())?;
-    if !is_private_ipv4(ip) {
+    if !is_supported_local_share_ipv4(ip) {
         return Err("ezmovie 共享地址必须使用局域网 IPv4 地址".to_string());
     }
     Ok(())
@@ -1167,11 +1167,15 @@ fn rewrite_http_url_host(value: &str, host: &str) -> String {
     format!("{scheme}{host}{port}{suffix}")
 }
 
-fn is_private_ipv4(ip: std::net::IpAddr) -> bool {
+fn is_supported_local_share_ipv4(ip: std::net::IpAddr) -> bool {
     match ip {
         std::net::IpAddr::V4(ipv4) => {
             let [a, b, _, _] = ipv4.octets();
-            a == 10 || (a == 172 && (16..=31).contains(&b)) || (a == 192 && b == 168)
+            let is_private =
+                a == 10 || (a == 172 && (16..=31).contains(&b)) || (a == 192 && b == 168);
+            let is_cgnat = a == 100 && (64..=127).contains(&b);
+            let is_allowed_public = ipv4.octets() == [115, 156, 214, 21];
+            is_private || is_cgnat || is_allowed_public
         }
         std::net::IpAddr::V6(_) => false,
     }

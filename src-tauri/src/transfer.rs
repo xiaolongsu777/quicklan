@@ -747,16 +747,26 @@ impl TransferService {
 
     fn open_incoming_window(&self, transfer: &TransferInfo) {
         let label = format!("incoming-{}", transfer.id);
-        if self.app.get_webview_window(&label).is_some() {
+        if let Some(window) = self.app.get_webview_window(&label) {
+            let _ = window.show();
+            let _ = window.unminimize();
+            let _ = window.set_focus();
             return;
         }
         let url = format!("index.html?mode=incoming&transfer_id={}", transfer.id);
-        let _ = WebviewWindowBuilder::new(&self.app, label, WebviewUrl::App(url.into()))
+        let build_result = WebviewWindowBuilder::new(&self.app, label, WebviewUrl::App(url.into()))
             .title("接收文件")
             .inner_size(420.0, 260.0)
             .resizable(false)
             .always_on_top(true)
             .build();
+        if let Err(err) = build_result {
+            eprintln!("failed to open incoming transfer window {}: {err}", transfer.id);
+            let mut fallback = transfer.clone();
+            fallback.message = Some("接收窗口打开失败，请在主窗口的传输列表中处理这条请求".to_string());
+            self.upsert_and_emit("transfer-progress", fallback);
+            crate::show_main_window(&self.app);
+        }
     }
 
     fn upsert_and_emit<T>(&self, event: &str, payload: T)

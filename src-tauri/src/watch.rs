@@ -620,7 +620,10 @@ fn is_private_http_url(value: &str) -> bool {
         return false;
     };
     let [a, b, _, _] = ipv4.octets();
-    a == 10 || (a == 172 && (16..=31).contains(&b)) || (a == 192 && b == 168)
+    let is_private = a == 10 || (a == 172 && (16..=31).contains(&b)) || (a == 192 && b == 168);
+    let is_cgnat = a == 100 && (64..=127).contains(&b);
+    let is_allowed_public = ipv4.octets() == [115, 156, 214, 21];
+    is_private || is_cgnat || is_allowed_public
 }
 
 fn now_secs() -> i64 {
