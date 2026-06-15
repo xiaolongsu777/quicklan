@@ -129,6 +129,16 @@ async fn handle_connection(
                 .unwrap_or_default();
             write_avatar(&mut stream, &settings, hash).await
         }
+        ("GET", path) if path.starts_with("/watch/player") => {
+            write_html(&mut stream, &crate::watch_player::build_live_stream_html()).await
+        }
+        ("GET", path) if path.starts_with("/watch/live-proxy") => {
+            let source = query_param(path, "source")
+                .map(percent_decode)
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| "missing live stream source".to_string())?;
+            proxy_http_get(&mut stream, &source).await
+        }
         ("GET", path) if path.starts_with("/shares/") => {
             let parts: Vec<&str> = path.trim_matches('/').split('/').collect();
             if parts.len() != 4 || parts[2] != "versions" {
@@ -420,6 +430,101 @@ fn avatar_content_type(path: &Path) -> &'static str {
         "webp" => "image/webp",
         _ => "image/jpeg",
     }
+}
+
+async fn write_html(stream: &mut TcpStream, html: &str) -> Result<(), String> {
+    let response = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n{}",
+        html.len(),
+        html
+    );
+    stream
+        .write_all(response.as_bytes())
+        .await
+        .map_err(|err| format!("写入 HTML 响应失败: {err}"))
+}
+
+async fn proxy_http_get(client: &mut TcpStream, source_url: &str) -> Result<(), String> {
+    let target = parse_http_url(source_url)?;
+    let mut upstream = TcpStream::connect(target.address)
+        .await
+        .map_err(|err| format!("连接直播源失败: {err}"))?;
+    let request = format!(
+        "GET {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
+        target.path, target.host
+    );
+    upstream
+        .write_all(request.as_bytes())
+        .await
+        .map_err(|err| format!("请求直播源失败: {err}"))?;
+    tokio::io::copy(&mut upstream, client)
+        .await
+        .map_err(|err| format!("转发直播流失败: {err}"))?;
+    Ok(())
+}
+
+fn query_param<'a>(path: &'a str, key: &str) -> Option<&'a str> {
+    let query = path.split_once('?')?.1;
+    query.split('&').find_map(|pair| {
+        let (name, value) = pair.split_once('=')?;
+        if name == key { Some(value) } else { None }
+    })
+}
+
+fn percent_decode(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'%' if index + 2 < bytes.len() => {
+                let hex = &value[index + 1..index + 3];
+                if let Ok(byte) = u8::from_str_radix(hex, 16) {
+                    out.push(byte);
+                    index += 3;
+                    continue;
+                }
+                out.push(bytes[index]);
+                index += 1;
+            }
+            b'+' => {
+                out.push(b' ');
+                index += 1;
+            }
+            byte => {
+                out.push(byte);
+                index += 1;
+            }
+        }
+    }
+    String::from_utf8(out).unwrap_or_else(|_| value.to_string())
+}
+
+struct ParsedHttpUrl {
+    host: String,
+    path: String,
+    address: std::net::SocketAddr,
+}
+
+fn parse_http_url(value: &str) -> Result<ParsedHttpUrl, String> {
+    let trimmed = value.trim();
+    let without_scheme = trimmed
+        .strip_prefix("http://")
+        .ok_or_else(|| "only http live streams are supported".to_string())?;
+    let (host_port, path_part) = match without_scheme.split_once('/') {
+        Some((host_port, path)) => (host_port, format!("/{}", path)),
+        None => (without_scheme, "/".to_string()),
+    };
+    let address = host_port
+        .to_socket_addrs()
+        .map_err(|err| format!("解析直播源地址失败: {err}"))?
+        .next()
+        .ok_or_else(|| "直播源地址为空".to_string())?;
+    Ok(ParsedHttpUrl {
+        host: host_port.to_string(),
+        path: path_part,
+        address,
+    })
 }
 
 async fn write_json(

@@ -45,6 +45,7 @@ import {
   discoverIp,
   downloadShare,
   endWatchRoom,
+  getLocalEzmovieStream,
   getAppInfo,
   getControlApiInfo,
   getGameRoomState,
@@ -54,6 +55,7 @@ import {
   getTransfer,
   getTransfers,
   installUpdate,
+  importLocalEzmovieStream,
   listChatMessages,
   listChatRooms,
   listDevices,
@@ -213,6 +215,11 @@ function MainWindow() {
     : null;
   const selectedWatchRoom = selectedWatchRoomId
     ? watchRooms.find((room) => room.room_id === selectedWatchRoomId) ?? null
+    : null;
+  const selectedWatchSourceUrl = selectedWatchRoom
+    ? selectedWatchRoom.source_kind === "local_ezmovie"
+      ? selectedWatchRoom.stream_preview_url ?? selectedWatchRoom.stream_url
+      : selectedWatchRoom.current_url
     : null;
   const onlineCount = devices.filter((device) => device.online).length;
 
@@ -514,7 +521,13 @@ function MainWindow() {
         }
       })
       .catch((err) => setError(err instanceof Error ? err.message : String(err)));
-  }, [selectedWatchRoom?.room_id, selectedWatchRoom?.current_url]);
+  }, [
+    selectedWatchRoom?.room_id,
+    selectedWatchRoom?.current_url,
+    selectedWatchRoom?.source_kind,
+    selectedWatchRoom?.stream_url,
+    selectedWatchRoom?.stream_preview_url,
+  ]);
 
   useEffect(() => {
     if (!selectedGameRoom) {
@@ -553,7 +566,12 @@ function MainWindow() {
   }, [selectedWatchRoom?.room_id, watchActivation?.is_member]);
 
   useEffect(() => {
-    if (!pendingWatchSync || !watchActivation?.is_member || selectedWatchRoom?.room_id !== pendingWatchSync.room_id) {
+    if (
+      !pendingWatchSync ||
+      !watchActivation?.is_member ||
+      selectedWatchRoom?.room_id !== pendingWatchSync.room_id ||
+      selectedWatchRoom?.source_kind !== "url"
+    ) {
       return;
     }
     const timer = window.setTimeout(() => {
@@ -571,7 +589,7 @@ function MainWindow() {
       return;
     }
     const element = watchViewportRef.current;
-    if (!element || !selectedWatchRoom?.current_url) return;
+    if (!element || !selectedWatchSourceUrl) return;
 
     let frame = 0;
     const syncBounds = () => {
@@ -601,7 +619,7 @@ function MainWindow() {
       window.removeEventListener("scroll", requestSync, true);
       window.removeEventListener("resize", requestSync);
     };
-  }, [tab, chatSection, selectedWatchRoom?.room_id, selectedWatchRoom?.current_url]);
+  }, [tab, chatSection, selectedWatchRoom?.room_id, selectedWatchSourceUrl]);
 
   return (
     <main className="shell">
@@ -918,6 +936,17 @@ function MainWindow() {
                   setWatchRooms((current) => upsertWatchRoom(current, room));
                   setWatchUrlDraft(room.current_url ?? "");
                 }, "Video link updated")
+              }
+              onImportLocalStream={() =>
+                void runAction(async () => {
+                  if (!selectedWatchRoom) throw new Error("Please select a watch room first");
+                  const localStream = await getLocalEzmovieStream();
+                  if (!localStream?.active) {
+                    throw new Error("当前未检测到本机 ezmovie 推流");
+                  }
+                  const room = await importLocalEzmovieStream(selectedWatchRoom.room_id);
+                  setWatchRooms((current) => upsertWatchRoom(current, room));
+                }, "Local live stream imported")
               }
             />
           }
@@ -1903,10 +1932,17 @@ function WatchTab(props: {
   onEndRoom: () => void;
   onSend: () => void;
   onSubmitUrl: () => void;
+  onImportLocalStream: () => void;
 }) {
   const canSend = !!props.selectedRoom && !!props.draft.trim();
   const isHost = props.activation?.is_host ?? false;
   const messagesRef = useRef<HTMLDivElement | null>(null);
+  const isLiveRoom = props.selectedRoom?.source_kind === "local_ezmovie";
+  const playableUrl = props.selectedRoom
+    ? props.selectedRoom.source_kind === "local_ezmovie"
+      ? props.selectedRoom.stream_preview_url ?? props.selectedRoom.stream_url
+      : props.selectedRoom.current_url
+    : null;
 
   useEffect(() => {
     const element = messagesRef.current;
@@ -1943,7 +1979,15 @@ function WatchTab(props: {
                     <span className="pill">{room.is_private ? "密码" : "公开"}</span>
                   </div>
                   <p className="muted">房主：{room.host_name} · {room.member_ids.length} 人</p>
-                  <p className="muted">视频：{room.current_url ? simplifyVideoUrl(room.current_url) : "等待房主提交链接"}</p>
+                  <p className="muted">
+                    {room.source_kind === "local_ezmovie"
+                      ? room.stream_preview_url
+                        ? `直播：${simplifyVideoUrl(room.stream_preview_url)}`
+                        : room.stream_url
+                          ? `直播：${simplifyVideoUrl(room.stream_url)}`
+                          : "等待房主导入本地推流"
+                      : `视频：${room.current_url ? simplifyVideoUrl(room.current_url) : "等待房主提交链接"}`}
+                  </p>
                   <button
                     className="primary compact"
                     disabled={props.busy || isHostRoom}
@@ -1971,6 +2015,11 @@ function WatchTab(props: {
                   房主：{props.selectedRoom.host_name} · {props.selectedRoom.member_ids.length} 人 ·{" "}
                   {props.selectedRoom.is_private ? "密码房" : "公开房"}
                 </p>
+                <p className="muted">
+                  {isLiveRoom
+                    ? `当前使用局域网直播地址：${simplifyVideoUrl(playableUrl ?? "")}`
+                    : "当前为视频链接模式"}
+                </p>
               </div>
               <div className="row-actions">
                 {isHost && (
@@ -1990,18 +2039,29 @@ function WatchTab(props: {
                 <button className="primary" disabled={props.busy || !props.urlDraft.trim()} onClick={props.onSubmitUrl}>
                   提交链接
                 </button>
+                <button className="secondary" disabled={props.busy} onClick={props.onImportLocalStream}>
+                  导入本地推流
+                </button>
               </div>
             )}
             <div className="watch-player-frame" ref={props.viewportRef}>
-              {!props.selectedRoom.current_url ? (
+              {!playableUrl ? (
                 <div className="watch-player-placeholder">
-                  <strong>等待房主提交视频链接</strong>
-                  <p className="muted">房间和右侧聊天已经可用，房主提交后会直接加载到这里。</p>
+                  <strong>{isLiveRoom ? "等待直播地址可用" : "等待房主提交视频链接"}</strong>
+                  <p className="muted">
+                    {isLiveRoom
+                      ? "请确认 ezmovie 已开始推流，并且其他局域网设备能访问该直播地址。"
+                      : "房主提交链接后会直接加载到这里。"}
+                  </p>
                 </div>
               ) : (
                 <div className="watch-player-placeholder ready">
-                  <strong>视频正在内嵌窗口中播放</strong>
-                  <p className="muted">切换其它页面时会隐藏播放器，但后台不会暂停。</p>
+                  <strong>{isLiveRoom ? "直播正在内嵌窗口中播放" : "视频正在内嵌窗口中播放"}</strong>
+                  <p className="muted">
+                    {isLiveRoom
+                      ? "直播模式不会提供暂停、拖动或倍速同步。"
+                      : "切换其它页面时会隐藏播放器，但后台不会暂停。"}
+                  </p>
                 </div>
               )}
             </div>

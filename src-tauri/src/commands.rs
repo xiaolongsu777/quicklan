@@ -100,6 +100,16 @@ pub struct WatchActivation {
     pub is_member: bool,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct LocalEzmovieStreamInfo {
+    pub active: bool,
+    pub url: String,
+    pub lan_preview_url: String,
+    pub quick_lan_import_url: String,
+    pub room_id: String,
+    pub stream_code: Option<String>,
+}
+
 #[tauri::command]
 pub fn list_game_rooms(
     state: State<'_, AppState>,
@@ -506,6 +516,40 @@ pub fn submit_watch_room_url(
 }
 
 #[tauri::command]
+pub fn get_local_ezmovie_stream() -> Result<Option<LocalEzmovieStreamInfo>, String> {
+    fetch_local_ezmovie_stream()
+}
+
+#[tauri::command]
+pub fn import_local_ezmovie_stream(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    room_id: String,
+) -> Result<WatchRoom, String> {
+    let stream = fetch_local_ezmovie_stream()?
+        .ok_or_else(|| "当前未检测到本机 ezmovie 推流".to_string())?;
+    let room = state.watch.import_local_stream(
+        &room_id,
+        &state.library.device_id(),
+        stream.url.clone(),
+        Some(stream.lan_preview_url.clone()),
+        stream.room_id,
+        stream.stream_code,
+    )?;
+    if let Some(url) = effective_watch_room_url(&state, &room, &state.library.device_id()) {
+        state.watch_player.activate(
+            &app,
+            room.room_id.clone(),
+            room.host_device_id.clone(),
+            true,
+            Some(url),
+        )?;
+    }
+    broadcast_watch_room(&state, &room);
+    Ok(room)
+}
+
+#[tauri::command]
 pub fn send_watch_chat_message(
     state: State<'_, AppState>,
     room_id: String,
@@ -541,7 +585,7 @@ pub async fn activate_watch_room(
             room.room_id.clone(),
             room.host_device_id.clone(),
             is_host,
-            room.current_url.clone(),
+            effective_watch_room_url(&state, &room, &local_id),
         )?;
     } else {
         state.watch_player.hide(&app)?;
@@ -948,6 +992,169 @@ pub fn update_library_settings(
     settings: LibrarySettings,
 ) -> Result<LibrarySettings, String> {
     state.library.update_settings(settings)
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct EzmovieSessionResponse {
+    active: bool,
+    url: Option<String>,
+    preview_url: Option<String>,
+    lan_preview_url: Option<String>,
+    quick_lan_import_url: Option<String>,
+    room_id: Option<String>,
+    stream_code: Option<String>,
+}
+
+fn fetch_local_ezmovie_stream() -> Result<Option<LocalEzmovieStreamInfo>, String> {
+    let Some(address) = ("127.0.0.1", 18333)
+        .to_socket_addrs()
+        .map_err(|err| format!("解析 ezmovie 本地地址失败: {err}"))?
+        .next()
+    else {
+        return Ok(None);
+    };
+    let mut stream = match StdTcpStream::connect_timeout(&address, Duration::from_secs(2)) {
+        Ok(stream) => stream,
+        Err(_) => return Ok(None),
+    };
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
+    stream
+        .write_all(
+            b"GET /session HTTP/1.1\r\nHost: 127.0.0.1:18333\r\nConnection: close\r\n\r\n",
+        )
+        .map_err(|err| format!("请求 ezmovie 会话失败: {err}"))?;
+    let mut response = String::new();
+    stream
+        .read_to_string(&mut response)
+        .map_err(|err| format!("读取 ezmovie 会话失败: {err}"))?;
+    let mut sections = response.splitn(2, "\r\n\r\n");
+    let head = sections.next().unwrap_or_default();
+    let body = sections
+        .next()
+        .or_else(|| response.splitn(2, "\n\n").nth(1))
+        .unwrap_or_default();
+    if !head.starts_with("HTTP/1.1 200") && !head.starts_with("HTTP/1.0 200") {
+        return Ok(None);
+    }
+    let session = serde_json::from_str::<EzmovieSessionResponse>(body)
+        .map_err(|err| format!("解析 ezmovie 会话失败: {err}"))?;
+    if !session.active {
+        return Ok(None);
+    }
+
+    let stream_url = session
+        .url
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "ezmovie 会话缺少可共享的直播地址".to_string())?;
+    validate_local_ezmovie_share_url(&stream_url)?;
+
+    let quick_lan_import_url = session
+        .quick_lan_import_url
+        .or_else(|| session.lan_preview_url.clone())
+        .or_else(|| session.preview_url.clone())
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "ezmovie session is missing a QuickLAN import URL".to_string())?;
+    validate_local_ezmovie_share_url(&quick_lan_import_url)?;
+
+    let lan_preview_url = session
+        .lan_preview_url
+        .or(session.preview_url)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "ezmovie 会话缺少局域网预览地址".to_string())?;
+    validate_local_ezmovie_share_url(&lan_preview_url)?;
+
+    let room_id = session
+        .room_id
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "ezmovie 会话缺少房间 ID".to_string())?;
+
+    Ok(Some(LocalEzmovieStreamInfo {
+        active: true,
+        url: quick_lan_import_url.clone(),
+        lan_preview_url,
+        quick_lan_import_url,
+        room_id,
+        stream_code: session.stream_code,
+    }))
+}
+
+fn validate_local_ezmovie_share_url(value: &str) -> Result<(), String> {
+    let host = extract_http_host(value)?;
+    if host == "127.0.0.1" || host == "localhost" {
+        return Err("该直播地址仅限本机访问，不能共享给局域网观众".to_string());
+    }
+    let ip = host
+        .parse::<std::net::IpAddr>()
+        .map_err(|_| "ezmovie 共享地址必须使用局域网 IPv4 地址".to_string())?;
+    if !is_private_ipv4(ip) {
+        return Err("ezmovie 共享地址必须使用局域网 IPv4 地址".to_string());
+    }
+    Ok(())
+}
+
+fn extract_http_host(value: &str) -> Result<&str, String> {
+    let rest = value
+        .strip_prefix("http://")
+        .or_else(|| value.strip_prefix("https://"))
+        .ok_or_else(|| "ezmovie 共享地址必须是 http 或 https".to_string())?;
+    let authority = rest
+        .split('/')
+        .next()
+        .filter(|part| !part.trim().is_empty())
+        .ok_or_else(|| "ezmovie 直播地址缺少主机名".to_string())?;
+    Ok(authority.split(':').next().unwrap_or(authority))
+}
+
+fn effective_watch_room_url(
+    state: &State<'_, AppState>,
+    room: &WatchRoom,
+    local_device_id: &str,
+) -> Option<String> {
+    match room.source_kind {
+        crate::watch::WatchSourceKind::Url => room.current_url.clone(),
+        crate::watch::WatchSourceKind::LocalEzmovie => {
+            let base_url = room
+                .stream_preview_url
+                .clone()
+                .or_else(|| room.stream_url.clone())?;
+            if room.host_device_id == local_device_id {
+                return Some(base_url);
+            }
+            let host = state.discovery.find_device(&room.host_device_id)?;
+            Some(rewrite_http_url_host(&base_url, &host.ip))
+        }
+    }
+}
+
+fn rewrite_http_url_host(value: &str, host: &str) -> String {
+    let (scheme, rest) = if let Some(rest) = value.strip_prefix("http://") {
+        ("http://", rest)
+    } else if let Some(rest) = value.strip_prefix("https://") {
+        ("https://", rest)
+    } else {
+        return value.to_string();
+    };
+    let (authority, suffix) = match rest.split_once('/') {
+        Some((authority, path)) => (authority, format!("/{path}")),
+        None => (rest, String::new()),
+    };
+    let port = authority
+        .split_once(':')
+        .map(|(_, port)| format!(":{port}"))
+        .unwrap_or_default();
+    format!("{scheme}{host}{port}{suffix}")
+}
+
+fn is_private_ipv4(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(ipv4) => {
+            let [a, b, _, _] = ipv4.octets();
+            a == 10 || (a == 172 && (16..=31).contains(&b)) || (a == 192 && b == 168)
+        }
+        std::net::IpAddr::V6(_) => false,
+    }
 }
 
 fn fetch_latest_github_release() -> Result<GithubRelease, String> {

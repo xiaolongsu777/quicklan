@@ -121,11 +121,25 @@ export type WatchRoom = {
   title: string;
   is_private: boolean;
   password_hash: string | null;
+  source_kind: "url" | "local_ezmovie";
   current_url: string | null;
+  stream_url: string | null;
+  stream_preview_url: string | null;
+  stream_room_id: string | null;
+  stream_code: string | null;
   member_ids: string[];
   status: string;
   created_at: number;
   updated_at: number;
+};
+
+export type LocalEzmovieStreamInfo = {
+  active: boolean;
+  url: string;
+  lan_preview_url: string;
+  quick_lan_import_url: string;
+  room_id: string;
+  stream_code: string | null;
 };
 
 export type WatchChatMessage = {

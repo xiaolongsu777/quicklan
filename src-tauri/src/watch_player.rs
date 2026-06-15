@@ -429,6 +429,45 @@ fn now_secs() -> i64 {
         .unwrap_or_default()
 }
 
+pub fn build_live_stream_html() -> String {
+    r#"<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>QuickLAN Live</title>
+    <style>
+      :root { color-scheme: dark; }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        background: #121820;
+        color: #e8eef5;
+        font: 16px/1.5 "Segoe UI", sans-serif;
+      }
+      .card {
+        max-width: 520px;
+        padding: 24px;
+        border-radius: 18px;
+        background: rgba(255,255,255,0.06);
+        box-shadow: 0 20px 60px rgba(0,0,0,0.35);
+      }
+      h1 { margin: 0 0 12px; font-size: 24px; }
+      p { margin: 0; color: #b8c4d4; }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <h1>QuickLAN 直播页</h1>
+      <p>当前版本已优先使用 ezmovie 提供的局域网预览地址。这个内置页仅保留兼容用途。</p>
+    </div>
+  </body>
+</html>"#
+        .to_string()
+}
+
 const WATCH_INIT_SCRIPT: &str = r#"
 (() => {
   if (window.__quicklanWatchInstalled) return;

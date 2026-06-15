@@ -12,6 +12,7 @@ import type {
   GameRoomSnapshot,
   GameRoomSummary,
   LibrarySettings,
+  LocalEzmovieStreamInfo,
   NetworkStatus,
   ShareItem,
   TransferInfo,
@@ -120,6 +121,10 @@ export function listWatchChatMessages(roomId: string): Promise<WatchChatMessage[
   return invoke<WatchChatMessage[]>("list_watch_chat_messages", { roomId });
 }
 
+export function getLocalEzmovieStream(): Promise<LocalEzmovieStreamInfo | null> {
+  return invoke<LocalEzmovieStreamInfo | null>("get_local_ezmovie_stream");
+}
+
 export function createWatchRoom(
   title: string,
   isPrivate: boolean,
@@ -142,6 +147,10 @@ export function endWatchRoom(roomId: string): Promise<void> {
 
 export function submitWatchRoomUrl(roomId: string, url: string): Promise<WatchRoom> {
   return invoke<WatchRoom>("submit_watch_room_url", { roomId, url });
+}
+
+export function importLocalEzmovieStream(roomId: string): Promise<WatchRoom> {
+  return invoke<WatchRoom>("import_local_ezmovie_stream", { roomId });
 }
 
 export function sendWatchChatMessage(roomId: string, body: string): Promise<WatchChatMessage> {

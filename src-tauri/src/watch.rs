@@ -1,7 +1,7 @@
 use crate::storage;
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fs,
     path::PathBuf,
     sync::{Arc, Mutex},
@@ -11,6 +11,19 @@ use uuid::Uuid;
 
 const REMOTE_ROOM_STALE_SECS: i64 = 8;
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WatchSourceKind {
+    Url,
+    LocalEzmovie,
+}
+
+impl Default for WatchSourceKind {
+    fn default() -> Self {
+        Self::Url
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WatchRoom {
     pub room_id: String,
@@ -19,7 +32,17 @@ pub struct WatchRoom {
     pub title: String,
     pub is_private: bool,
     pub password_hash: Option<String>,
+    #[serde(default)]
+    pub source_kind: WatchSourceKind,
     pub current_url: Option<String>,
+    #[serde(default)]
+    pub stream_url: Option<String>,
+    #[serde(default)]
+    pub stream_preview_url: Option<String>,
+    #[serde(default)]
+    pub stream_room_id: Option<String>,
+    #[serde(default)]
+    pub stream_code: Option<String>,
     pub member_ids: Vec<String>,
     pub status: String,
     pub created_at: i64,
@@ -66,6 +89,8 @@ pub struct WatchJoinResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct WatchState {
+    #[serde(default)]
+    remote_room_seen_at: HashMap<String, i64>,
     rooms: Vec<WatchRoom>,
     messages: Vec<WatchChatMessage>,
 }
@@ -84,6 +109,7 @@ impl WatchService {
             .ok()
             .and_then(|content| serde_json::from_str::<WatchState>(&content).ok())
             .unwrap_or(WatchState {
+                remote_room_seen_at: HashMap::new(),
                 rooms: Vec::new(),
                 messages: Vec::new(),
             });
@@ -188,7 +214,12 @@ impl WatchService {
                 title: clean_title,
                 is_private,
                 password_hash: normalized_password_hash(is_private, password_hash)?,
+                source_kind: WatchSourceKind::Url,
                 current_url: None,
+                stream_url: None,
+                stream_preview_url: None,
+                stream_room_id: None,
+                stream_code: None,
                 member_ids: vec![self.local_device_id.clone()],
                 status: "active".to_string(),
                 created_at: now,
@@ -203,6 +234,13 @@ impl WatchService {
     pub fn accept_room(&self, room: WatchRoom) -> Result<(), String> {
         {
             let mut state = self.lock()?;
+            if room.host_device_id != self.local_device_id {
+                state
+                    .remote_room_seen_at
+                    .insert(room.room_id.clone(), now_secs());
+            } else {
+                state.remote_room_seen_at.remove(&room.room_id);
+            }
             upsert_room(&mut state.rooms, room);
         }
         self.save()
@@ -213,6 +251,7 @@ impl WatchService {
             let mut state = self.lock()?;
             state.rooms.retain(|room| room.room_id != room_id);
             state.messages.retain(|message| message.room_id != room_id);
+            state.remote_room_seen_at.remove(room_id);
         }
         self.save()
     }
@@ -290,7 +329,49 @@ impl WatchService {
             if room.host_device_id != requester_device_id {
                 return Err("只有房主可以提交视频链接".to_string());
             }
+            room.source_kind = WatchSourceKind::Url;
             room.current_url = Some(url);
+            room.stream_url = None;
+            room.stream_preview_url = None;
+            room.stream_room_id = None;
+            room.stream_code = None;
+            room.updated_at = now_secs();
+            updated = room.clone();
+        }
+        self.save()?;
+        Ok(updated)
+    }
+
+    pub fn import_local_stream(
+        &self,
+        room_id: &str,
+        requester_device_id: &str,
+        stream_url: String,
+        stream_preview_url: Option<String>,
+        stream_room_id: String,
+        stream_code: Option<String>,
+    ) -> Result<WatchRoom, String> {
+        validate_watch_url(&stream_url)?;
+        if let Some(preview_url) = &stream_preview_url {
+            validate_watch_url(preview_url)?;
+        }
+        let updated;
+        {
+            let mut state = self.lock()?;
+            let room = state
+                .rooms
+                .iter_mut()
+                .find(|room| room.room_id == room_id && room.status == "active")
+                .ok_or_else(|| "观影房间不存在".to_string())?;
+            if room.host_device_id != requester_device_id {
+                return Err("只有房主可以导入本地推流".to_string());
+            }
+            room.source_kind = WatchSourceKind::LocalEzmovie;
+            room.current_url = None;
+            room.stream_url = Some(stream_url);
+            room.stream_preview_url = stream_preview_url;
+            room.stream_room_id = Some(stream_room_id);
+            room.stream_code = stream_code;
             room.updated_at = now_secs();
             updated = room.clone();
         }
@@ -385,13 +466,30 @@ impl WatchService {
     fn prune_stale_remote_rooms(&self) -> Result<bool, String> {
         let mut state = self.lock()?;
         let now = now_secs();
+        let room_ids_to_remove = state
+            .rooms
+            .iter()
+            .filter(|room| room.host_device_id != self.local_device_id)
+            .filter_map(|room| {
+                let keep = state
+                    .remote_room_seen_at
+                    .get(&room.room_id)
+                    .copied()
+                    .map(|seen_at| now.saturating_sub(seen_at) <= REMOTE_ROOM_STALE_SECS)
+                    .unwrap_or(false);
+                (!keep).then(|| room.room_id.clone())
+            })
+            .collect::<HashSet<_>>();
         let before_rooms = state.rooms.len();
         state.rooms.retain(|room| {
-            room.host_device_id == self.local_device_id
-                || now.saturating_sub(room.updated_at) <= REMOTE_ROOM_STALE_SECS
+            room.host_device_id == self.local_device_id || !room_ids_to_remove.contains(&room.room_id)
         });
         if state.rooms.len() == before_rooms {
             return Ok(false);
+        }
+        for room_id in &room_ids_to_remove {
+            state.remote_room_seen_at.remove(room_id);
+            eprintln!("watch room expired locally due to missing refresh: {room_id}");
         }
         let active_room_ids = state
             .rooms
@@ -401,6 +499,9 @@ impl WatchService {
         state
             .messages
             .retain(|message| active_room_ids.contains(&message.room_id));
+        state
+            .remote_room_seen_at
+            .retain(|room_id, _| active_room_ids.contains(room_id));
         Ok(true)
     }
 }

@@ -510,6 +510,10 @@ select {
   min-height: 0;
 }
 
+.watch-chat-panel {
+  grid-template-rows: auto minmax(0, 1fr) auto auto;
+}
+
 .game-sidebar,
 .game-main {
   min-height: 0;
@@ -549,7 +553,7 @@ select {
 
 .watch-url-bar {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) auto auto;
   gap: 10px;
 }
 
@@ -811,6 +815,10 @@ select {
   max-height: 140px;
   resize: vertical;
   line-height: 1.45;
+}
+
+.fit {
+  width: 100%;
 }
 
 .member-picker {
