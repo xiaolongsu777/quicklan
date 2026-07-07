@@ -38,6 +38,7 @@ use serde::Serialize;
 use settings::SettingsService;
 use std::{
     collections::HashSet,
+    fs,
     io::{Read, Write},
     net::TcpStream as StdTcpStream,
     time::Duration,
@@ -140,9 +141,30 @@ fn acquire_single_instance() -> Option<SingleInstanceGuard> {
     Some(SingleInstanceGuard(handle))
 }
 
+// Linux: file-lock based single-instance guard
 #[cfg(not(windows))]
-fn acquire_single_instance() -> Option<()> {
-    Some(())
+#[allow(dead_code)]
+struct SingleInstanceGuard(fs::File);
+
+#[cfg(not(windows))]
+fn acquire_single_instance() -> Option<SingleInstanceGuard> {
+    let lock_path = storage::config_dir().join("single_instance.lock");
+    if let Some(parent) = lock_path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let file = match fs::File::create(&lock_path) {
+        Ok(f) => f,
+        Err(err) => {
+            eprintln!("failed to create QuickLAN lock file: {err}");
+            return None;
+        }
+    };
+    use fs2::FileExt;
+    if file.try_lock_exclusive().is_err() {
+        notify_existing_instance();
+        return None;
+    }
+    Some(SingleInstanceGuard(file))
 }
 
 fn notify_existing_instance() {

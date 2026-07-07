@@ -30,6 +30,71 @@ use std::os::windows::process::CommandExt;
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
+#[cfg(target_os = "linux")]
+fn open_file_manager(path: &std::path::Path) -> Result<(), String> {
+    // Try dbus-based file manager first (GNOME, KDE, etc.)
+    let file_uri = format!("file://{}", path.display());
+    if Command::new("dbus-send")
+        .args([
+            "--session",
+            "--dest=org.freedesktop.FileManager1",
+            "--type=method_call",
+            "/org/freedesktop/FileManager1",
+            "org.freedesktop.FileManager1.ShowItems",
+            &format!("array:string:{}", file_uri),
+            "string:",
+        ])
+        .spawn()
+        .map(|mut child| child.wait())
+        .is_ok()
+    {
+        return Ok(());
+    }
+    // Fallback to xdg-open on the directory
+    let dir = if path.is_file() {
+        path.parent().unwrap_or(path)
+    } else {
+        path
+    };
+    Command::new("xdg-open")
+        .arg(dir)
+        .spawn()
+        .map_err(|err| format!("打开文件管理器失败: {err}"))?;
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn open_file_manager(path: &std::path::Path) -> Result<(), String> {
+    if path.is_file() {
+        let target = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        Command::new("explorer.exe")
+            .arg(format!("/select,{}", target.display()))
+            .spawn()
+            .map_err(|err| format!("打开资源管理器失败: {err}"))?;
+    } else {
+        let mut target = if path.is_dir() {
+            path.to_path_buf()
+        } else {
+            path.parent()
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("."))
+        };
+        while !target.exists() {
+            let Some(parent) = target.parent().map(PathBuf::from) else {
+                target = PathBuf::from(".");
+                break;
+            };
+            target = parent;
+        }
+        let target = target.canonicalize().unwrap_or(target);
+        Command::new("explorer.exe")
+            .arg(target)
+            .spawn()
+            .map_err(|err| format!("打开资源管理器失败: {err}"))?;
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub fn list_devices(state: State<'_, AppState>) -> Vec<DeviceInfo> {
     state.discovery.list_devices()
@@ -893,34 +958,22 @@ pub async fn choose_folder_path(app: AppHandle) -> Result<Option<String>, String
 #[tauri::command]
 pub fn open_path_location(path: String) -> Result<(), String> {
     let path = PathBuf::from(path);
-    if path.is_file() {
-        let target = path.canonicalize().unwrap_or(path);
-        Command::new("explorer.exe")
-            .arg(format!("/select,{}", target.display()))
-            .spawn()
-            .map_err(|err| format!("打开资源管理器失败: {err}"))?;
+    let target = if path.exists() {
+        path.canonicalize().unwrap_or(path)
     } else {
-        let mut target = if path.is_dir() {
-            path
-        } else {
-            path.parent()
-                .map(PathBuf::from)
-                .unwrap_or_else(|| PathBuf::from("."))
-        };
-        while !target.exists() {
-            let Some(parent) = target.parent().map(PathBuf::from) else {
-                target = PathBuf::from(".");
+        let mut t = path.parent()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("."));
+        while !t.exists() {
+            let Some(parent) = t.parent().map(PathBuf::from) else {
+                t = PathBuf::from(".");
                 break;
             };
-            target = parent;
+            t = parent;
         }
-        let target = target.canonicalize().unwrap_or(target);
-        Command::new("explorer.exe")
-            .arg(target)
-            .spawn()
-            .map_err(|err| format!("打开资源管理器失败: {err}"))?;
-    }
-    Ok(())
+        t.canonicalize().unwrap_or(t)
+    };
+    open_file_manager(&target)
 }
 
 #[tauri::command]

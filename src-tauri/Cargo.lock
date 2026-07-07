@@ -1077,6 +1077,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs2"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9564fc758e15025b46aa6643b1b77d047d1a56a1aea6e01002ac0c7026876213"
+dependencies = [
+ "libc",
+ "winapi 0.3.9",
+]
+
+[[package]]
 name = "futures-channel"
 version = "0.3.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2746,6 +2756,7 @@ name = "quicklan"
 version = "0.2.0"
 dependencies = [
  "dirs 5.0.1",
+ "fs2",
  "get_if_addrs",
  "hostname",
  "rusqlite",
