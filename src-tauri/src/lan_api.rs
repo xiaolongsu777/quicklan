@@ -170,7 +170,7 @@ async fn handle_connection(
             write_json(&mut stream, 202, json!({"ok":true})).await
         }
         ("POST", "/chat/messages") => {
-            if let Ok(payload) = serde_json::from_str::<ChatMessagePayload>(body) {
+            if let Some(payload) = decode_chat_payload(body) {
                 if chat.is_local_member(&payload.room) {
                     chat.accept_message(payload.clone())?;
                     let _ = app.emit("chat-message-received", payload);
@@ -387,6 +387,17 @@ async fn handle_connection(
         }
         _ => write_json(&mut stream, 404, json!({"error":"not_found"})).await,
     }
+}
+
+/// 解析聊天消息正文：优先按加密信封解密，失败则回退明文解析（兼容旧版本发送方）。
+fn decode_chat_payload(body: &str) -> Option<ChatMessagePayload> {
+    if let Ok(envelope) = serde_json::from_str::<crate::crypto::EncryptedEnvelope>(body) {
+        if envelope.encrypted {
+            let plain = crate::crypto::decrypt_envelope(&envelope).ok()?;
+            return serde_json::from_str::<ChatMessagePayload>(&plain).ok();
+        }
+    }
+    serde_json::from_str::<ChatMessagePayload>(body).ok()
 }
 
 async fn write_avatar(

@@ -1,6 +1,7 @@
 mod chat;
 mod commands;
 mod control_api;
+mod crypto;
 mod discovery;
 mod game;
 mod lan_api;

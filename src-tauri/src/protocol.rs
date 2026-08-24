@@ -22,6 +22,8 @@ pub struct DiscoveryPacket {
     pub manifest_hash: String,
     pub upload_tasks: i64,
     pub avatar_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public_key: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub known_peers: Vec<KnownPeerHint>,
 }
@@ -57,6 +59,8 @@ pub struct DeviceInfo {
     pub latency_ms: Option<u64>,
     pub note: Option<String>,
     pub avatar_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public_key: Option<String>,
     pub is_local: bool,
     pub is_known: bool,
     pub discovered_via: Option<String>,

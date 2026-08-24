@@ -732,6 +732,7 @@ impl TransferService {
             manifest_hash: summary.manifest_hash,
             upload_tasks: 0,
             avatar_hash: None,
+            public_key: Some(crate::crypto::public_key_b64()),
             known_peers: Vec::new(),
         };
         if let Ok(socket) = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)) {

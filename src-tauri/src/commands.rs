@@ -1399,8 +1399,22 @@ fn post_chat_message(state: &State<'_, AppState>, payload: &ChatMessagePayload) 
     let targets = chat_targets(state, &payload.room);
     if let Ok(body) = serde_json::to_string(payload) {
         for device in targets {
-            post_lan_json(&device, "/chat/messages", &body);
+            let send_body = encrypt_chat_body(&device, &body);
+            post_lan_json(&device, "/chat/messages", &send_body);
         }
+    }
+}
+
+/// 对支持加密的设备用其公钥加密聊天消息，否则回退明文（兼容旧版本设备）。
+fn encrypt_chat_body(device: &DeviceInfo, plaintext: &str) -> String {
+    match device.public_key.as_deref() {
+        Some(peer_key) if !peer_key.trim().is_empty() => {
+            match crate::crypto::encrypt_for_peer(peer_key, plaintext) {
+                Ok(envelope) => serde_json::to_string(&envelope).unwrap_or_else(|_| plaintext.to_string()),
+                Err(_) => plaintext.to_string(),
+            }
+        }
+        _ => plaintext.to_string(),
     }
 }
 

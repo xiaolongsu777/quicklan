@@ -199,6 +199,7 @@ impl DiscoveryService {
             manifest_hash: summary.manifest_hash,
             upload_tasks: 0,
             avatar_hash: self.settings.avatar_hash(),
+            public_key: Some(crate::crypto::public_key_b64()),
             known_peers,
         }
     }
@@ -342,6 +343,7 @@ impl DiscoveryService {
                     latency_ms: None,
                     note: service.library.device_note(&packet.device_id),
                     avatar_hash: packet.avatar_hash.clone().or(previous_avatar_hash),
+                    public_key: packet.public_key.clone(),
                     is_local: false,
                     is_known: true,
                     discovered_via: Some(discovered_via_label.to_string()),
@@ -448,6 +450,7 @@ impl DiscoveryService {
             latency_ms: Some(0),
             note: self.library.device_note(&self.device_id),
             avatar_hash: self.settings.avatar_hash(),
+            public_key: Some(crate::crypto::public_key_b64()),
             is_local: true,
             is_known: true,
             discovered_via: Some("local".to_string()),
